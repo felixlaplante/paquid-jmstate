@@ -169,7 +169,7 @@ class MetropolisHastingsSampler:
         return self.n_accepted / max(self.n_samples, 1)
 
     @property
-    def current_step_size(self) -> float:
+    def step_size(self) -> float:
         """Gets current step_size.
 
         Returns:
