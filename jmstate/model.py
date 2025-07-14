@@ -407,11 +407,11 @@ class MultiStateJointModel(HazardMixin):
                 warnings.warn(f"Error in iteration {iteration}: {e}")
                 continue
 
-        # Compute Fisher Information Matrix
-        self._compute_fim(n_iter_fim, cont_warmup)
-
         # Set fit_ to True
         self.fit_ = True
+
+        # Compute Fisher Information Matrix
+        self._compute_fim(n_iter_fim, cont_warmup)
 
     def _compute_fim(self, n_iter_fim: int, cont_warmup: int) -> None:
         """Computes the Fisher Information Matrix.
