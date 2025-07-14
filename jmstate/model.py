@@ -95,10 +95,10 @@ class MultiStateJointModel(HazardMixin):
                 vals = obs * obs_ll - alts_ll
                 ll.scatter_add_(0, idx, vals)
 
+            return ll
+
         except Exception as e:
             raise RuntimeError(f"Failed to compute hazard likelihood: {e}") from e
-
-        return ll
 
     def _long_ll(self, psi: torch.Tensor, data: ModelData) -> torch.Tensor:
         """Computes the longitudinal log likelihood.
