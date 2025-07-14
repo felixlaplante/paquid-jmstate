@@ -67,8 +67,8 @@ class MultiStateJointModel(HazardMixin):
 
         ll = torch.zeros(data.size)
 
-        for d, bucket in data.buckets_.items():
-            alpha, beta = self.params_.alphas[d], self.params_.betas[d]
+        for key, bucket in data.buckets_.items():
+            alpha, beta = self.params_.alphas[key], self.params_.betas[key]
             idx, t0, t1, obs = bucket
 
             obs_ll, alts_ll = self._log_and_cum_hazard(
@@ -240,6 +240,7 @@ class MultiStateJointModel(HazardMixin):
                 for (t0, s0), (t1, s1) in zip(ext_trajectory[:-1], ext_trajectory[1:]):
                     if t0 >= t1:
                         continue
+                        
                     if s1 is not None and (s0, s1) not in trans:
                         raise ValueError(
                             f"Transition {(s0, s1)} must be in model_design.surv keys"
