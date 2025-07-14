@@ -458,6 +458,7 @@ def flat_from_tril(L: torch.Tensor) -> torch.Tensor:
 
         n = L.shape[0]
         i, j = torch.tril_indices(n, n)
+        
         return L[i, j]
 
     except Exception as e:
@@ -479,9 +480,9 @@ def precision_from_log_cholesky(L: torch.Tensor) -> torch.Tensor:
 
     try:
         L.diagonal().exp_()
-        LLT = L @ L.T
+        P = L @ L.T
 
-        return LLT
+        return P
 
     except Exception as e:
         raise RuntimeError(f"Failed to construct log Cholesky: {e}") from e
