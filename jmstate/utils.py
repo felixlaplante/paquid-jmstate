@@ -502,7 +502,7 @@ def log_cholesky_from_precision(P: torch.Tensor) -> torch.Tensor:
     """
 
     try:
-        L: torch.Tensor = cast(torch.Tensor, torch.linalg.log_cholesky(P))  # type: ignore
+        L: torch.Tensor = cast(torch.Tensor, torch.linalg.cholesky(P))  # type: ignore
         L.diagonal().log_()
 
         return L
