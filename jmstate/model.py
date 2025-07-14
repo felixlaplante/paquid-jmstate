@@ -83,11 +83,11 @@ class MultiStateJointModel(HazardMixin):
 
             # Check for invalid values
             if obs_ll.isnan().any() or obs_ll.isinf().any():
-                warnings.warn(f"Invalid observed log likelihood for bucket {d}")
+                warnings.warn(f"Invalid observed log likelihood for bucket {key}")
                 continue
 
             if alts_ll.isnan().any() or alts_ll.isinf().any():
-                warnings.warn(f"Invalid cumulative hazard for bucket {d}")
+                warnings.warn(f"Invalid cumulative hazard for bucket {key}")
                 continue
 
             vals = obs * obs_ll - alts_ll
