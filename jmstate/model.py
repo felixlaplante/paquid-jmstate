@@ -130,7 +130,7 @@ class MultiStateJointModel(HazardMixin):
             log_det_R = -torch.diag(R_inv).sum() * 2
 
             # Compute the precision matrix
-            R_inv = precision_from_cholesky(R_inv)
+            R_inv = precision_from_log_cholesky(R_inv)
 
             # Compute quadratic form: diff.T @ R_inv @ diff for each individual
             quad_form = torch.einsum("ijk,kl,ijl->i", diff, R_inv, diff)
@@ -168,7 +168,7 @@ class MultiStateJointModel(HazardMixin):
             log_det_Q = -torch.diag(Q_inv).sum() * 2
 
             # Compute the precision matrix
-            Q_inv = precision_from_cholesky(Q_inv)
+            Q_inv = precision_from_log_cholesky(Q_inv)
 
             # Compute quadratic form: b.T @ Q_inv @ b for each individual
             quad_form = torch.einsum("ik,kl,il->i", b, Q_inv, b)
