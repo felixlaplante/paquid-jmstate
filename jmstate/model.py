@@ -78,7 +78,7 @@ class MultiStateJointModel(HazardMixin):
                 psi[idx],
                 alpha,
                 beta,
-                *self.model_design.surv[d],
+                *self.model_design.surv[key],
             )
 
             # Check for invalid values
@@ -240,7 +240,7 @@ class MultiStateJointModel(HazardMixin):
                 for (t0, s0), (t1, s1) in zip(ext_trajectory[:-1], ext_trajectory[1:]):
                     if t0 >= t1:
                         continue
-                        
+
                     if s1 is not None and (s0, s1) not in trans:
                         raise ValueError(
                             f"Transition {(s0, s1)} must be in model_design.surv keys"
