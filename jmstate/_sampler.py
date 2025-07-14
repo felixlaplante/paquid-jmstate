@@ -73,73 +73,61 @@ class MetropolisHastingsSampler:
     def step(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Performs a single kernel step.
 
-        Raises:
-            RuntimeError: If the step failed.
-
         Returns:
             tuple[torch.Tensor, torch.Tensor]: A tuple containing current_state and current_log_prob.
         """
 
+        # Detach current state to avoid gradient accumulation
+        self.current_state_ = self.current_state_.detach()
+        self.current_log_prob_ = self.current_log_prob_.detach()
+
+        # Generate proposal
+        noise = torch.randn_like(self.current_state_)
+        proposed_state = self.current_state_ + noise * self.step_size_
+
+        # Compute proposal log probability
         try:
-            # Detach current state to avoid gradient accumulation
-            self.current_state_ = self.current_state_.detach()
-            self.current_log_prob_ = self.current_log_prob_.detach()
-
-            # Generate proposal
-            noise = torch.randn_like(self.current_state_)
-            proposed_state = self.current_state_ + noise * self.step_size_
-
-            # Compute proposal log probability
-            try:
-                proposed_log_prob = self.log_prob_fn(proposed_state)
-            except Exception as e:
-                warnings.warn(f"Failed to compute proposal log probability: {e}")
-                return self.current_state_, self.current_log_prob_
-
-            # Check for invalid log probabilities
-            if (
-                torch.isnan(proposed_log_prob).any()
-                or torch.isinf(proposed_log_prob).any()
-            ):
-                warnings.warn("Invalid log probability encountered in proposal")
-                return self.current_state_, self.current_log_prob_
-
-            # Compute acceptance probability
-            log_prob_diff = proposed_log_prob - self.current_log_prob_
-
-            # Vectorized acceptance decision
-            log_uniform = torch.log(
-                torch.clamp(torch.rand_like(log_prob_diff), min=1e-8)
-            )
-            accept_mask = log_uniform < log_prob_diff
-
-            # Update accepted states
-            if accept_mask.any():
-                self.current_state_ = torch.where(
-                    (
-                        accept_mask.unsqueeze(-1)
-                        if accept_mask.dim() < self.current_state_.dim()
-                        else accept_mask
-                    ),
-                    proposed_state,
-                    self.current_state_,
-                )
-                self.current_log_prob_ = torch.where(
-                    accept_mask, proposed_log_prob, self.current_log_prob_
-                )
-
-            # Update statistics
-            self.n_samples += 1
-            accepted = accept_mask.float().mean().item()
-            self.n_accepted += accepted
-
-            # Adapt step size
-            self._adapt_step_size(accepted)
-
+            proposed_log_prob = self.log_prob_fn(proposed_state)
+        except Exception as e:
+            warnings.warn(f"Failed to compute proposal log probability: {e}")
             return self.current_state_, self.current_log_prob_
 
-        except Exception as e:
-            raise RuntimeError("Kernel step failed: {e}") from e
+        # Check for invalid log probabilities
+        if torch.isnan(proposed_log_prob).any() or torch.isinf(proposed_log_prob).any():
+            warnings.warn("Invalid log probability encountered in proposal")
+            return self.current_state_, self.current_log_prob_
+
+        # Compute acceptance probability
+        log_prob_diff = proposed_log_prob - self.current_log_prob_
+
+        # Vectorized acceptance decision
+        log_uniform = torch.log(torch.clamp(torch.rand_like(log_prob_diff), min=1e-8))
+        accept_mask = log_uniform < log_prob_diff
+
+        # Update accepted states
+        if accept_mask.any():
+            self.current_state_ = torch.where(
+                (
+                    accept_mask.unsqueeze(-1)
+                    if accept_mask.dim() < self.current_state_.dim()
+                    else accept_mask
+                ),
+                proposed_state,
+                self.current_state_,
+            )
+            self.current_log_prob_ = torch.where(
+                accept_mask, proposed_log_prob, self.current_log_prob_
+            )
+
+        # Update statistics
+        self.n_samples += 1
+        accepted = accept_mask.float().mean().item()
+        self.n_accepted += accepted
+
+        # Adapt step size
+        self._adapt_step_size(accepted)
+
+        return self.current_state_, self.current_log_prob_
 
     def warmup(self, warmup: int) -> None:
         """Warmups the MCMC.
@@ -149,19 +137,14 @@ class MetropolisHastingsSampler:
 
         Raises:
             ValueError: If the warmup steps is not positive.
-            RuntimeError: If the warmup fails.
         """
 
-        try:
-            if warmup < 0:
-                raise ValueError("Warmup must be a non-negative integer")
+        if warmup < 0:
+            raise ValueError("Warmup must be a non-negative integer")
 
-            with torch.no_grad():
-                for _ in range(warmup):
-                    self.step()
-
-        except Exception as e:
-            raise RuntimeError("Warmup failed: {e}") from e
+        with torch.no_grad():
+            for _ in range(warmup):
+                self.step()
 
     def _adapt_step_size(self, accept_rate: float):
         """Adapt the step_size.

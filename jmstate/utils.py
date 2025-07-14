@@ -92,20 +92,13 @@ class ModelData:
     )
 
     def __post_init__(self):
-        """Runs the post init conversions and checks.
+        """Runs the post init conversions and checks."""
 
-        Raises:
-            RuntimeError: If conversion to float32 fails.
-        """
-        try:
-            # Convert to float32
-            self.x = torch.as_tensor(self.x, dtype=torch.float32)
-            self.t = torch.as_tensor(self.t, dtype=torch.float32)
-            self.y = torch.as_tensor(self.y, dtype=torch.float32)
-            self.c = torch.as_tensor(self.c, dtype=torch.float32)
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to convert the data: {e}") from e
+        # Convert to float32
+        self.x = torch.as_tensor(self.x, dtype=torch.float32)
+        self.t = torch.as_tensor(self.t, dtype=torch.float32)
+        self.y = torch.as_tensor(self.y, dtype=torch.float32)
+        self.c = torch.as_tensor(self.c, dtype=torch.float32)
 
         self._check()
 
@@ -146,6 +139,7 @@ class ModelData:
             (1, self.y.shape[1]),
             self.y.shape[:2],
         ]
+        
         if self.t.shape not in valid_t_shapes:
             raise ValueError("t must be broadcastable with y")
 
@@ -194,24 +188,14 @@ class SampleData:
     )
 
     def __post_init__(self):
-        """Runs the post init conversions and checks.
+        """Runs the post init conversions and checks."""
 
-        Raises:
-            RuntimeError: If conversion to float32 fails.
-        """
-
-        try:
-            # Convert to float32
-            self.x = torch.as_tensor(self.x, dtype=torch.float32)
-            self.c = (
-                torch.as_tensor(self.c, dtype=torch.float32)
-                if self.c is not None
-                else None
-            )
-            self.psi = torch.as_tensor(self.psi, dtype=torch.float32)
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to convert the data: {e}") from e
+        # Convert to float32
+        self.x = torch.as_tensor(self.x, dtype=torch.float32)
+        self.c = (
+            torch.as_tensor(self.c, dtype=torch.float32) if self.c is not None else None
+        )
+        self.psi = torch.as_tensor(self.psi, dtype=torch.float32)
 
         self._check()
 
@@ -282,27 +266,18 @@ class ModelParams:
     R_dim_: int = field(init=False, repr=False)
 
     def __post_init__(self):
-        """Convert to float32 the parameters.
-
-        Raises:
-            RuntimeError: If the conversion fails.
-        """
+        """Convert to float32 the parameters."""
 
         # Convert to float32
+        self.gamma = torch.as_tensor(self.gamma, dtype=torch.float32)
+        self.Q_inv = torch.as_tensor(self.Q_inv, dtype=torch.float32)
+        self.R_inv = torch.as_tensor(self.R_inv, dtype=torch.float32)
 
-        try:
-            self.gamma = torch.as_tensor(self.gamma, dtype=torch.float32)
-            self.Q_inv = torch.as_tensor(self.Q_inv, dtype=torch.float32)
-            self.R_inv = torch.as_tensor(self.R_inv, dtype=torch.float32)
+        for alpha in self.alphas.values():
+            alpha = torch.as_tensor(alpha, dtype=torch.float32)
 
-            for alpha in self.alphas.values():
-                alpha = torch.as_tensor(alpha, dtype=torch.float32)
-
-            for beta in self.betas.values():
-                beta = torch.as_tensor(beta, dtype=torch.float32)
-
-        except Exception as e:
-            raise RuntimeError("Conversion to float32 failed") from e
+        for beta in self.betas.values():
+            beta = torch.as_tensor(beta, dtype=torch.float32)
 
         self._check()
         self._set_dims()
@@ -364,48 +339,47 @@ class ModelParams:
             list[torch.Tensor]: The list of the parameters.
         """
 
-        try:
-            params_list: list[torch.Tensor] = []
+        params_list: list[torch.Tensor] = []
 
-            # Add non-dictionary parameters
-            params_list.append(self.gamma)
-            params_list.append(self.Q_inv)
-            params_list.append(self.R_inv)
+        # Add non-dictionary parameters
+        params_list.append(self.gamma)
+        params_list.append(self.Q_inv)
+        params_list.append(self.R_inv)
 
-            # Add dictionary parameters
-            params_list.extend(self.alphas.values())
-            params_list.extend(self.betas.values())
+        # Add dictionary parameters
+        params_list.extend(self.alphas.values())
+        params_list.extend(self.betas.values())
 
-            return params_list
+        return params_list
 
-        except Exception as e:
-            raise RuntimeError("Unable to convert to list") from e
+    @property
+    def numel(self) -> int:
+        """Return the number of parameters.
+
+        Returns:
+            int: The number of the parameters.
+        """
+
+        return sum([p.numel() for p in self.as_list])
 
     def require_grad(self, req: bool):
         """Enable gradient computation on all parameters.
 
         Args:
             req (bool): Wether to require or not.
-
-        Raises:
-            RuntimeError: If requiring grad fails.
         """
 
-        try:
-            # Enable gradients for non-dictionary parameters
-            self.gamma.requires_grad_(req)
-            self.Q_inv.requires_grad_(req)
-            self.R_inv.requires_grad_(req)
+        # Enable gradients for non-dictionary parameters
+        self.gamma.requires_grad_(req)
+        self.Q_inv.requires_grad_(req)
+        self.R_inv.requires_grad_(req)
 
-            # Enable gradients for dictionary parameters
-            for tensor in self.alphas.values():
-                tensor.requires_grad_(req)
+        # Enable gradients for dictionary parameters
+        for tensor in self.alphas.values():
+            tensor.requires_grad_(req)
 
-            for tensor in self.betas.values():
-                tensor.requires_grad_(req)
-
-        except Exception as e:
-            raise RuntimeError("Unable to change grad requirements to {req}") from e
+        for tensor in self.betas.values():
+            tensor.requires_grad_(req)
 
 
 def tril_from_flat(flat: torch.Tensor, n: int) -> torch.Tensor:
@@ -458,7 +432,7 @@ def flat_from_tril(L: torch.Tensor) -> torch.Tensor:
 
         n = L.shape[0]
         i, j = torch.tril_indices(n, n)
-        
+
         return L[i, j]
 
     except Exception as e:
@@ -478,14 +452,10 @@ def precision_from_log_cholesky(L: torch.Tensor) -> torch.Tensor:
         torch.Tensor: The inverse covariance (precision) matrix.
     """
 
-    try:
-        L.diagonal().exp_()
-        P = L @ L.T
+    L.diagonal().exp_()
+    P = L @ L.T
 
-        return P
-
-    except Exception as e:
-        raise RuntimeError(f"Failed to construct log Cholesky: {e}") from e
+    return P
 
 
 def log_cholesky_from_precision(P: torch.Tensor) -> torch.Tensor:

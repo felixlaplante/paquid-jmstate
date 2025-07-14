@@ -49,32 +49,26 @@ class HazardMixin:
             log_lambda0 (BaseFun): Base hazard function.
             g (LinkFun): Link function.
 
-        Raises:
-            RuntimeError: If the computation fails.
-
         Returns:
             torch.Tensor: The computed log hazard.
         """
-        try:
-            # Compute baseline hazard
-            base = log_lambda0(t1, t0)
 
-            # Compute time-varying effects
-            mod = g(t1, x, psi)
+        # Compute baseline hazard
+        base = log_lambda0(t1, t0)
 
-            # Validate g output
-            if torch.isnan(mod).any() or torch.isinf(mod).any():
-                warnings.warn("Invalid values in g(t,x,psi)")
+        # Compute time-varying effects
+        mod = g(t1, x, psi)
 
-            # Compute log hazard
-            log_hazard = (
-                base + torch.einsum("ijk,k->ij", mod, alpha) + x @ beta.unsqueeze(1)
-            )
+        # Validate g output
+        if torch.isnan(mod).any() or torch.isinf(mod).any():
+            warnings.warn("Invalid values in g(t,x,psi)")
 
-            return log_hazard
+        # Compute log hazard
+        log_hazard = (
+            base + torch.einsum("ijk,k->ij", mod, alpha) + x @ beta.unsqueeze(1)
+        )
 
-        except Exception as e:
-            raise RuntimeError(f"Error in log hazard computation: {e}")
+        return log_hazard
 
     def _cum_hazard(
         self,
@@ -99,42 +93,34 @@ class HazardMixin:
             log_lambda0 (BaseFun): Base hazard function.
             g (LinkFun): Link function.
 
-        Raises:
-            RuntimeError: If the computation fails.
-
         Returns:
             torch.Tensor: The computed cumulative hazard.
         """
-        try:
-            # Reshape for broadcasting
-            t0, t1 = t0.view(-1, 1), t1.view(-1, 1)
 
-            # Transform to quadrature interval [-1, 1]
-            mid = 0.5 * (t0 + t1)
-            half = 0.5 * (t1 - t0)
+        # Reshape for broadcasting
+        t0, t1 = t0.view(-1, 1), t1.view(-1, 1)
 
-            # Evaluate at quadrature points
-            ts = mid + half * self._std_nodes
+        # Transform to quadrature interval [-1, 1]
+        mid = 0.5 * (t0 + t1)
+        half = 0.5 * (t1 - t0)
 
-            # Compute hazard at quadrature points
-            log_hazard_vals = self._log_hazard(
-                t0, ts, x, psi, alpha, beta, log_lambda0, g
-            )
+        # Evaluate at quadrature points
+        ts = mid + half * self._std_nodes
 
-            # Numerical integration using Gaussian quadrature
-            hazard_vals = torch.exp(torch.clamp(log_hazard_vals, min=-50.0, max=50.0))
+        # Compute hazard at quadrature points
+        log_hazard_vals = self._log_hazard(t0, ts, x, psi, alpha, beta, log_lambda0, g)
 
-            # Check for numerical issues
-            if torch.isnan(hazard_vals).any() or torch.isinf(hazard_vals).any():
-                warnings.warn("Numerical issues in hazard computation")
-                hazard_vals = torch.nan_to_num(hazard_vals, nan=0.0, posinf=1e10)
+        # Numerical integration using Gaussian quadrature
+        hazard_vals = torch.exp(torch.clamp(log_hazard_vals, min=-50.0, max=50.0))
 
-            cumulative = half.flatten() * (hazard_vals * self._std_weights).sum(dim=1)
+        # Check for numerical issues
+        if torch.isnan(hazard_vals).any() or torch.isinf(hazard_vals).any():
+            warnings.warn("Numerical issues in hazard computation")
+            hazard_vals = torch.nan_to_num(hazard_vals, nan=0.0, posinf=1e10)
 
-            return cumulative
+        integral = half.flatten() * (hazard_vals * self._std_weights).sum(dim=1)
 
-        except Exception as e:
-            raise RuntimeError(f"Error in cumulative hazard computation: {e}")
+        return integral
 
     def _log_and_cum_hazard(
         self,
@@ -166,33 +152,29 @@ class HazardMixin:
             tuple[torch.Tensor, torch.Tensor]: A tuple containing log and cumulative hazard.
         """
 
-        try:
-            # Reshape for broadcasting
-            t0, t1 = t0.view(-1, 1), t1.view(-1, 1)
+        # Reshape for broadcasting
+        t0, t1 = t0.view(-1, 1), t1.view(-1, 1)
 
-            # Transform to quadrature interval
-            mid = 0.5 * (t0 + t1)
-            half = 0.5 * (t1 - t0)
+        # Transform to quadrature interval
+        mid = 0.5 * (t0 + t1)
+        half = 0.5 * (t1 - t0)
 
-            # Combine endpoint and quadrature points
-            ts = torch.cat([t1, mid + half * self._std_nodes], dim=1)
+        # Combine endpoint and quadrature points
+        ts = torch.cat([t1, mid + half * self._std_nodes], dim=1)
 
-            # Compute log hazard at all points
-            temp = self._log_hazard(t0, ts, x, psi, alpha, beta, log_lambda0, g)
+        # Compute log hazard at all points
+        temp = self._log_hazard(t0, ts, x, psi, alpha, beta, log_lambda0, g)
 
-            # Extract log hazard at endpoint and quadrature points
-            log_hazard = temp[:, :1]  # Log hazard at t1
-            quad_vals = torch.exp(
-                torch.clamp(temp[:, 1:], min=-50.0, max=50.0)
-            )  # Hazard at quadrature points
+        # Extract log hazard at endpoint and quadrature points
+        log_hazard = temp[:, :1]  # Log hazard at t1
+        quad_vals = torch.exp(
+            torch.clamp(temp[:, 1:], min=-50.0, max=50.0)
+        )  # Hazard at quadrature points
 
-            # Compute cumulative hazard using quadrature
-            cumulative = half.flatten() * (quad_vals * self._std_weights).sum(dim=1)
+        # Compute cumulative hazard using quadrature
+        integral = half.flatten() * (quad_vals * self._std_weights).sum(dim=1)
 
-            return log_hazard.flatten(), cumulative
-
-        except Exception as e:
-            raise RuntimeError(f"Error in joint hazard computation: {e}")
+        return log_hazard.flatten(), integral
 
     def _sample_trajectory_step(
         self,
@@ -222,45 +204,38 @@ class HazardMixin:
             n_bissect (int): _description_
             c (torch.Tensor | None, optional): _description_. Defaults to None.
 
-        Raises:
-            RuntimeError: If the computation fails.
-
         Returns:
             torch.Tensor: The computed pre transition times.
         """
 
-        try:
-            n = x.shape[0]
+        n = x.shape[0]
 
-            # Initialize for bisection search
-            t0 = t_left.clone().view(-1, 1)
-            t_left, t_right = t_left.view(-1, 1), t_right.view(-1, 1)
+        # Initialize for bisection search
+        t0 = t_left.clone().view(-1, 1)
+        t_left, t_right = t_left.view(-1, 1), t_right.view(-1, 1)
 
-            # Generate exponential random variables
-            target = -torch.log(torch.clamp(torch.rand(n), min=1e-8))
+        # Generate exponential random variables
+        target = -torch.log(torch.clamp(torch.rand(n), min=1e-8))
 
-            # Adjust target if conditioning on existing survival
-            if c is not None:
-                c = c.view(-1, 1)
-                existing_hazard = self._cum_hazard(
-                    t0, c, x, psi, alpha, beta, log_lambda0, g
-                )
-                target += existing_hazard
+        # Adjust target if conditioning on existing survival
+        if c is not None:
+            c = c.view(-1, 1)
+            existing_hazard = self._cum_hazard(
+                t0, c, x, psi, alpha, beta, log_lambda0, g
+            )
+            target += existing_hazard
 
-            # Bisection search for survival times
-            for _ in range(n_bissect):
-                t_mid = 0.5 * (t_left + t_right)
+        # Bisection search for survival times
+        for _ in range(n_bissect):
+            t_mid = 0.5 * (t_left + t_right)
 
-                cumulative = self._cum_hazard(
-                    t0, t_mid, x, psi, alpha, beta, log_lambda0, g
-                )
+            cumulative = self._cum_hazard(
+                t0, t_mid, x, psi, alpha, beta, log_lambda0, g
+            )
 
-                # Update search bounds
-                accept_mask = cumulative < target
-                t_left[accept_mask] = t_mid[accept_mask]
-                t_right[~accept_mask] = t_mid[~accept_mask]
+            # Update search bounds
+            accept_mask = cumulative < target
+            t_left[accept_mask] = t_mid[accept_mask]
+            t_right[~accept_mask] = t_mid[~accept_mask]
 
-            return t_right.flatten()
-
-        except Exception as e:
-            raise RuntimeError(f"Error sampling survival times: {e}")
+        return t_right.flatten()

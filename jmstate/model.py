@@ -50,7 +50,9 @@ class MultiStateJointModel(HazardMixin):
         self.n_bissect = n_bissect
 
         # Initialize attributes that will be set during fitting
-        self.fim_ = None
+        self.sampler_: MetropolisHastingsSampler | None = None
+        self.fim_: torch.Tensor | None = None
+        self.fit_ = False
 
     def _hazard_ll(self, psi: torch.Tensor, data: ModelData) -> torch.Tensor:
         """Computes the hazard log likelihood.
@@ -59,46 +61,39 @@ class MultiStateJointModel(HazardMixin):
             psi (torch.Tensor): A matrix of individual parameters.
             data (ModelData): Dataset on which likelihood is computed.
 
-        Raises:
-            RuntimeError: If the computation fails.
-
         Returns:
             torch.Tensor: The computed log likelihood.
         """
 
         ll = torch.zeros(data.size)
 
-        try:
-            for d, bucket in data.buckets_.items():
-                alpha, beta = self.params_.alphas[d], self.params_.betas[d]
-                idx, t0, t1, obs = bucket
+        for d, bucket in data.buckets_.items():
+            alpha, beta = self.params_.alphas[d], self.params_.betas[d]
+            idx, t0, t1, obs = bucket
 
-                obs_ll, alts_ll = self._log_and_cum_hazard(
-                    t0,
-                    t1,
-                    data.x[idx],
-                    psi[idx],
-                    alpha,
-                    beta,
-                    *self.model_design.surv[d],
-                )
+            obs_ll, alts_ll = self._log_and_cum_hazard(
+                t0,
+                t1,
+                data.x[idx],
+                psi[idx],
+                alpha,
+                beta,
+                *self.model_design.surv[d],
+            )
 
-                # Check for invalid values
-                if obs_ll.isnan().any() or obs_ll.isinf().any():
-                    warnings.warn(f"Invalid observed log-likelihood for bucket {d}")
-                    continue
+            # Check for invalid values
+            if obs_ll.isnan().any() or obs_ll.isinf().any():
+                warnings.warn(f"Invalid observed log-likelihood for bucket {d}")
+                continue
 
-                if alts_ll.isnan().any() or alts_ll.isinf().any():
-                    warnings.warn(f"Invalid cumulative hazard for bucket {d}")
-                    continue
+            if alts_ll.isnan().any() or alts_ll.isinf().any():
+                warnings.warn(f"Invalid cumulative hazard for bucket {d}")
+                continue
 
-                vals = obs * obs_ll - alts_ll
-                ll.scatter_add_(0, idx, vals)
+            vals = obs * obs_ll - alts_ll
+            ll.scatter_add_(0, idx, vals)
 
-            return ll
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to compute hazard likelihood: {e}") from e
+        return ll
 
     def _long_ll(self, psi: torch.Tensor, data: ModelData) -> torch.Tensor:
         """Computes the longitudinal log likelihood.
@@ -107,45 +102,38 @@ class MultiStateJointModel(HazardMixin):
             psi (torch.Tensor): A matrix of individual parameters.
             data (ModelData): Dataset on which likelihood is computed.
 
-        Raises:
-            RuntimeError: If the computation fails.
-
         Returns:
             torch.Tensor: The computed log likelihood.
         """
 
-        try:
-            # Compute residuals: observed - predicted (only for valid observations)
-            predicted = self.model_design.h(data.valid_t_, data.x, psi)
-            diff = data.valid_y_ - predicted * data.valid_mask_
+        # Compute residuals: observed - predicted (only for valid observations)
+        predicted = self.model_design.h(data.valid_t_, data.x, psi)
+        diff = data.valid_y_ - predicted * data.valid_mask_
 
-            # Check for invalid predictions
-            if torch.isnan(predicted).any() or torch.isinf(predicted).any():
-                warnings.warn("Invalid predictions encountered in longitudinal model")
+        # Check for invalid predictions
+        if torch.isnan(predicted).any() or torch.isinf(predicted).any():
+            warnings.warn("Invalid predictions encountered in longitudinal model")
 
-            # Reconstruct precision matrix R_inv from Cholesky parametrization
-            R_inv = tril_from_flat(self.params_.R_inv, self.params_.R_dim_)
+        # Reconstruct precision matrix R_inv from Cholesky parametrization
+        R_inv = tril_from_flat(self.params_.R_inv, self.params_.R_dim_)
 
-            # Compute log determinant: log det = -2 * sum(log(diag(R_inv)))
-            log_det_R = -torch.diag(R_inv).sum() * 2
+        # Compute log determinant: log det = -2 * sum(log(diag(R_inv)))
+        log_det_R = -torch.diag(R_inv).sum() * 2
 
-            # Compute the precision matrix
-            R_inv = precision_from_log_cholesky(R_inv)
+        # Compute the precision matrix
+        R_inv = precision_from_log_cholesky(R_inv)
 
-            # Compute quadratic form: diff.T @ R_inv @ diff for each individual
-            quad_form = torch.einsum("ijk,kl,ijl->i", diff, R_inv, diff)
+        # Compute quadratic form: diff.T @ R_inv @ diff for each individual
+        quad_form = torch.einsum("ijk,kl,ijl->i", diff, R_inv, diff)
 
-            # Log-likelihood: -0.5 * (log|R| * n_valid + quadratic_form)
-            ll = -0.5 * (log_det_R * data.n_valid_ + quad_form)
+        # Log-likelihood: -0.5 * (log|R| * n_valid + quadratic_form)
+        ll = -0.5 * (log_det_R * data.n_valid_ + quad_form)
 
-            # Validate output
-            if torch.isnan(ll).any() or torch.isinf(ll).any():
-                warnings.warn("Invalid longitudinal likelihood computed")
+        # Validate output
+        if torch.isnan(ll).any() or torch.isinf(ll).any():
+            warnings.warn("Invalid longitudinal likelihood computed")
 
-            return ll
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to compute longitudinal likelihood: {e}") from e
+        return ll
 
     def _pr_ll(self, b: torch.Tensor) -> torch.Tensor:
         """Computes the prior log likelihood.
@@ -160,30 +148,26 @@ class MultiStateJointModel(HazardMixin):
             torch.Tensor: The computed log likelihood.
         """
 
-        try:
-            # Reconstruct precision matrix Q_inv from Cholesky parametrization
-            Q_inv = tril_from_flat(self.params_.Q_inv, self.params_.Q_dim_)
+        # Reconstruct precision matrix Q_inv from Cholesky parametrization
+        Q_inv = tril_from_flat(self.params_.Q_inv, self.params_.Q_dim_)
 
-            # Compute log determinant: log det = -2 * sum(log(diag(Q_inv)))
-            log_det_Q = -torch.diag(Q_inv).sum() * 2
+        # Compute log determinant: log det = -2 * sum(log(diag(Q_inv)))
+        log_det_Q = -torch.diag(Q_inv).sum() * 2
 
-            # Compute the precision matrix
-            Q_inv = precision_from_log_cholesky(Q_inv)
+        # Compute the precision matrix
+        Q_inv = precision_from_log_cholesky(Q_inv)
 
-            # Compute quadratic form: b.T @ Q_inv @ b for each individual
-            quad_form = torch.einsum("ik,kl,il->i", b, Q_inv, b)
+        # Compute quadratic form: b.T @ Q_inv @ b for each individual
+        quad_form = torch.einsum("ik,kl,il->i", b, Q_inv, b)
 
-            # Log-likelihood: -0.5 * (log det + quadratic_form)
-            ll = -0.5 * (log_det_Q + quad_form)
+        # Log-likelihood: -0.5 * (log det + quadratic_form)
+        ll = -0.5 * (log_det_Q + quad_form)
 
-            # Validate output
-            if torch.isnan(ll).any() or torch.isinf(ll).any():
-                warnings.warn("Invalid prior likelihood computed")
+        # Validate output
+        if torch.isnan(ll).any() or torch.isinf(ll).any():
+            warnings.warn("Invalid prior likelihood computed")
 
-            return ll
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to compute prior likelihood: {e}") from e
+        return ll
 
     def _ll(self, b: torch.Tensor, data: ModelData) -> torch.Tensor:
         """Computes the total log likelihood up to a constant.
@@ -192,41 +176,48 @@ class MultiStateJointModel(HazardMixin):
             b (torch.Tensor): The individual random effects.
             data (ModelData): Dataset on which the likeihood is computed.
 
-        Raises:
-            RuntimeError: If the computation fails.
-
         Returns:
             torch.Tensor: The computed total log likelihood.
         """
 
-        try:
-            # Transform random effects to individual-specific parameters
-            psi = self.model_design.f(self.params_.gamma, b)
+        # Transform random effects to individual-specific parameters
+        psi = self.model_design.f(self.params_.gamma, b)
 
-            # Validate transformation
-            if torch.isnan(psi).any() or torch.isinf(psi).any():
-                warnings.warn("Invalid psi values from transformation")
+        # Validate transformation
+        if torch.isnan(psi).any() or torch.isinf(psi).any():
+            warnings.warn("Invalid psi values from transformation")
 
-            # Compute individual likelihood components
-            long_ll = self._long_ll(psi, data)
-            hazard_ll = self._hazard_ll(psi, data)
-            prior_ll = self._pr_ll(b)
+        # Compute individual likelihood components
+        long_ll = self._long_ll(psi, data)
+        hazard_ll = self._hazard_ll(psi, data)
+        prior_ll = self._pr_ll(b)
 
-            # Sum all likelihood components
-            total_ll = long_ll + hazard_ll + prior_ll
+        # Sum all likelihood components
+        total_ll = long_ll + hazard_ll + prior_ll
 
-            # Final validation
-            if torch.isnan(total_ll).any() or torch.isinf(total_ll).any():
-                warnings.warn("Invalid total likelihood computed")
+        # Final validation
+        if torch.isnan(total_ll).any() or torch.isinf(total_ll).any():
+            warnings.warn("Invalid total likelihood computed")
 
-            return total_ll
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to compute total likelihood: {e}") from e
+        return total_ll
 
     def _build_vec_rep(
         self, trajectories: list[Traj], c: torch.Tensor
     ) -> dict[tuple[int, int], tuple[torch.Tensor, ...]]:
+        """Build vectorizable bucket representation.
+
+        Args:
+            trajectories (list[Traj]): The trajectories.
+            c (torch.Tensor): Censoring times.
+
+        Raises:
+            ValueError: If some keys are not in self.surv.
+            RuntimeError: If the building fails.
+
+        Returns:
+            dict[tuple[int, int], tuple[torch.Tensor, ...]]: The vectorizable buckets representation.
+        """
+
         try:
             # Get survival transitions defined in the model
             trans = set(self.model_design.surv.keys())
@@ -283,6 +274,7 @@ class MultiStateJointModel(HazardMixin):
         Args:
             data (ModelData): The current dataset.
         """
+
         # Add derived quantities
         data.valid_mask_ = ~torch.isnan(data.y)
         data.n_valid_ = data.valid_mask_.any(dim=2).sum(dim=1)
@@ -335,17 +327,13 @@ class MultiStateJointModel(HazardMixin):
         Returns:
             torch.Tensor: The mean log likelihood.
         """
+
         # Run batch sampling
         total_ll = torch.tensor(0.0)
 
         for _ in range(batch_size):
-            try:
-                _, curr_log_prob = sampler.step()
-                total_ll += curr_log_prob.sum()
-
-            except Exception as e:
-                warnings.warn(f"Error in batch sampling: {e}")
-                continue
+            _, curr_log_prob = sampler.step()
+            total_ll += curr_log_prob.sum()
 
         avg_ll = total_ll / batch_size
         return avg_ll
@@ -381,101 +369,102 @@ class MultiStateJointModel(HazardMixin):
             target_accept_rate (float, optional): Mean acceptation target. Defaults to 0.234.
             init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 500.
             cont_warmup (int, optional): The warmup step in-between each parameter changes. Defaults to 5.
-
-        Raises:
-            RuntimeError: If the likelihood optimization fails.
         """
 
-        try:
-            # Complete data
-            self._prepare_data(data)
+        # Complete data
+        self._prepare_data(data)
 
-            # Set up optimizer
-            self.params_.require_grad(True)
-            params_list = self.params_.as_list
-            optimizer_instance = optimizer(params=params_list, **optimizer_params)
+        # Set up optimizer
+        self.params_.require_grad(True)
+        params_list = self.params_.as_list
+        optimizer_instance = optimizer(params=params_list, **optimizer_params)
 
-            # Set up MCMC
-            sampler = self._setup_mcmc(data, step_size, adapt_rate, accept_target)
+        # Set up MCMC
+        self.sampler_ = self._setup_mcmc(data, step_size, adapt_rate, accept_target)
 
-            # Warmup MCMC
-            sampler.warmup(init_warmup)
+        # Warmup MCMC
+        self.sampler_.warmup(init_warmup)
 
-            # Main fitting loop
-            for iteration in tqdm(range(n_iter), desc="Fitting joint model"):
-                try:
-                    # MCMC: Sample random effects
-                    sampler.warmup(cont_warmup)
-                    avg_ll = self._mcmc_avg_ll(sampler, batch_size)
+        # Main fitting loop
+        for iteration in tqdm(range(n_iter), desc="Fitting joint model"):
+            try:
+                # MCMC: Sample random effects
+                self.sampler_.warmup(cont_warmup)
+                avg_ll = self._mcmc_avg_ll(self.sampler_, batch_size)
 
-                    # Optimization step: Update parameters
-                    optimizer_instance.zero_grad()
-                    nll = -avg_ll
-                    nll.backward()  # type: ignore
+                # Optimization step: Update parameters
+                optimizer_instance.zero_grad()
+                nll = -avg_ll
+                nll.backward()  # type: ignore
 
-                    optimizer_instance.step()
+                optimizer_instance.step()
 
-                    # Execute callback
-                    if callback is not None:
-                        callback()
+                # Execute callback
+                if callback is not None:
+                    callback()
 
-                except Exception as e:
-                    warnings.warn(f"Error in iteration {iteration}: {e}")
-                    continue
+            except Exception as e:
+                warnings.warn(f"Error in iteration {iteration}: {e}")
+                continue
 
-            # Compute Fisher Information Matrix
-            self._compute_fim(sampler, n_iter_fim, cont_warmup)
+        # Compute Fisher Information Matrix
+        self._compute_fim(n_iter_fim, cont_warmup)
 
-        except Exception as e:
-            raise RuntimeError(f"Error fitting joint model: {e}") from e
+        # Set fit_ to True
+        self.fit_ = True
 
-    def _compute_fim(
-        self, sampler: MetropolisHastingsSampler, n_iter_fim: int, cont_warmup: int
-    ) -> None:
+    def _compute_fim(self, n_iter_fim: int, cont_warmup: int) -> None:
         """Computes the Fisher Information Matrix.
 
         Args:
-            sampler (MetropolisHastingsSampler): _description_
-            n_iter_fim (int): _description_
-            cont_warmup (int): _description_
+            n_iter_fim (int): Number of iterations to calculate Fisher Information Matrix.
+            cont_warmup (int): The number of in-between warmup steps.
+
+        Raises:
+            ValueError: If self.sampler_ is None.
         """
 
-        try:
-            params_list = self.params_.as_list
-            d = sum(p.numel() for p in params_list)
-            self.fim_ = torch.zeros(d, d)
+        if not self.fit_:
+            warnings.warn(
+                "Model should be fit before computing Fisher Information Matrix"
+            )
 
-            for _ in tqdm(
-                range(n_iter_fim), desc="Computing Fisher Information Matrix"
-            ):
-                # Sample random effects
-                sampler.warmup(cont_warmup)
-                _, curr_ll = sampler.step()
+        if self.sampler_ is None:
+            raise ValueError("self.sampler_ must not be None")
 
-                # Clear gradients
-                for p in params_list:
-                    if p.grad is not None:
-                        p.grad.zero_()
+        params_list = self.params_.as_list
+        d = self.params_.numel
+        self.fim_ = torch.zeros(d, d)
 
-                # Compute gradients
-                ll = curr_ll.sum()
-                ll.backward()  # type: ignore
+        for _ in tqdm(range(n_iter_fim), desc="Computing Fisher Information Matrix"):
+            # Sample random effects
+            self.sampler_.warmup(cont_warmup)
+            _, curr_ll = self.sampler_.step()
 
-                # Collect gradient vector
-                grad_chunks: list[torch.Tensor] = []
-                for p in params_list:
-                    if p.grad is not None:
-                        grad_chunks.append(p.grad.view(-1))
-                    else:
-                        grad_chunks.append(torch.zeros(p.numel()))
+            # Clear gradients
+            for p in params_list:
+                if p.grad is not None:
+                    p.grad.zero_()
 
-                grad = torch.cat(grad_chunks)
+            # Compute gradients
+            ll = curr_ll.sum()
+            ll.backward()  # type: ignore
 
-                # Update Fisher Information Matrix
-                self.fim_ += torch.outer(grad, grad) / n_iter_fim
+            # Collect gradient vector
+            grad_chunks: list[torch.Tensor] = []
+            for p in params_list:
+                if p.grad is not None:
+                    grad_chunks.append(p.grad.view(-1))
+                else:
+                    grad_chunks.append(torch.zeros(p.numel()))
 
-        except Exception as e:
-            warnings.warn(f"Error computing Fisher Information Matrix: {e}")
+            grad = torch.cat(grad_chunks)
+
+            # Update Fisher Information Matrix
+            self.fim_ += torch.outer(grad, grad) / n_iter_fim
+
+        if torch.isnan(self.fim_).any() or torch.isinf(self.fim_).any():
+            warnings.warn("Error computing Fisher Information Matrix")
             self.fim_ = None
 
     def get_stderror(self) -> ModelParams:
@@ -484,58 +473,53 @@ class MultiStateJointModel(HazardMixin):
 
         Raises:
             ValueError: If the Fisher Information Matrix could not be computed.
-            RuntimeError: If the computation fails.
 
         Returns:
             ModelParams: The standard error in the same format as the parameters.
         """
 
+        # Check if self.fim_ is well defined
+        if self.fim_ is None:
+            raise ValueError(
+                "Fisher Information Matrix inference failed. CIs may not be computed."
+            )
+
+        # Get parameter vector
+        params_list = self.params_.as_list
+        params_flat = torch.cat([p.detach().flatten() for p in params_list])
+
+        # Compute standard errors
         try:
-            # Check if self.fim_ is well defined
-            if self.fim_ is None:
-                raise ValueError(
-                    "Fisher Information Matrix inference failed. CIs may not be computed."
-                )
-
-            # Get parameter vector
-            params_list = self.params_.as_list
-            params_flat = torch.cat([p.detach().flatten() for p in params_list])
-
-            # Compute standard errors
-            try:
-                fim_inv = torch.linalg.pinv(self.fim_)  # type: ignore
-                flat_se = torch.sqrt(fim_inv.diag())  # type: ignore
-
-            except Exception as e:
-                warnings.warn(f"Error inverting Fisher Information Matrix: {e}")
-                flat_se = torch.full_like(params_flat, torch.nan)
-
-            # Organize by parameter structure
-            se: dict[str, Any] = {}
-            i = 0
-
-            for key in ["gamma", "Q_inv", "R_inv", "alphas", "betas"]:
-                val = getattr(self.params_, key)
-                if isinstance(val, dict):
-                    param_dict = {}
-                    for subkey, subval in cast(
-                        list[tuple[tuple[int, int], torch.Tensor]], val.items()
-                    ):
-                        n = subval.numel()
-                        shape = subval.shape
-                        param_dict[subkey] = flat_se[i : i + n].view(shape)
-                        i += n
-                    se[key] = param_dict  # assign entire dict to field
-                else:
-                    n = val.numel()
-                    shape = val.shape
-                    se[key] = flat_se[i : i + n].view(shape)  # assign tensor
-                    i += n
-
-            return ModelParams(**se)
+            fim_inv = torch.linalg.pinv(self.fim_)  # type: ignore
+            flat_se = torch.sqrt(fim_inv.diag())  # type: ignore
 
         except Exception as e:
-            raise RuntimeError(f"Error computing standard error: {e}") from e
+            warnings.warn(f"Error inverting Fisher Information Matrix: {e}")
+            flat_se = torch.full_like(params_flat, torch.nan)
+
+        # Organize by parameter structure
+        se: dict[str, Any] = {}
+        i = 0
+
+        for key in ["gamma", "Q_inv", "R_inv", "alphas", "betas"]:
+            val = getattr(self.params_, key)
+            if isinstance(val, dict):
+                param_dict = {}
+                for subkey, subval in cast(
+                    list[tuple[tuple[int, int], torch.Tensor]], val.items()
+                ):
+                    n = subval.numel()
+                    shape = subval.shape
+                    param_dict[subkey] = flat_se[i : i + n].view(shape)
+                    i += n
+                se[key] = param_dict  # assign entire dict to field
+            else:
+                n = val.numel()
+                shape = val.shape
+                se[key] = flat_se[i : i + n].view(shape)  # assign tensor
+                i += n
+
+        return ModelParams(**se)
 
     def sample_trajectories(
         self,
