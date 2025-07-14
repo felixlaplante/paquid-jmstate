@@ -1,7 +1,7 @@
 from math import isqrt
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Callable, DefaultDict, TypeAlias
+from typing import Any, Callable, DefaultDict, TypeAlias, cast
 
 import torch
 
@@ -430,10 +430,38 @@ def tril_from_flat(flat: torch.Tensor, n: int) -> torch.Tensor:
         L = torch.zeros(n, n, dtype=flat.dtype).index_put_(
             tuple(torch.tril_indices(n, n)), flat
         )
+
+        return L
+
     except Exception as e:
         raise RuntimeError(f"Failed to construct Cholesky factor: {e}") from e
 
-    return L
+
+def flat_from_tril(L: torch.Tensor) -> torch.Tensor:
+    """Flatten the lower triangular part (including the diagonal) of a square matrix L
+    into a 1D tensor, in row-wise order.
+
+    Args:
+        L (torch.Tensor): Square lower-triangular matrix of shape (n, n).
+
+    Raises:
+        ValueError: If the input is not square.
+        RuntimeError: If the flattening fails.
+
+    Returns:
+        torch.Tensor: Flattened 1D tensor containing the lower triangular entries.
+    """
+
+    try:
+        if L.ndim != 2 or L.shape[0] != L.shape[1]:
+            raise ValueError("Input must be a square matrix")
+
+        n = L.shape[0]
+        i, j = torch.tril_indices(n, n)
+        return L[i, j]
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to flatten matrix: {e}") from e
 
 
 def precision_from_cholesky(L: torch.Tensor) -> torch.Tensor:
@@ -452,15 +480,52 @@ def precision_from_cholesky(L: torch.Tensor) -> torch.Tensor:
     try:
         L.diagonal().exp_()
         LLT = L @ L.T
+
+        return LLT
+
     except Exception as e:
         raise RuntimeError(f"Failed to construct Cholesky: {e}") from e
 
-    return LLT
+
+def cholesky_from_precision(P: torch.Tensor) -> torch.Tensor:
+    """Computes the Cholesky-like factor used in precision_from_cholesky.
+    (with log-diagonal convention) from the inverse covariance matrix.
+
+    Args:
+        P (torch.Tensor): Precision matrix (positive definite).
+
+    Raises:
+        RuntimeError: Error if the computation fails.
+
+    Returns:
+        torch.Tensor: Lower-triangular matrix L such that L.diag().exp() @ L.diag().exp().T = P
+    """
+
+    try:
+        L: torch.Tensor = cast(torch.Tensor, torch.linalg.cholesky(P))  # type: ignore
+        L.diagonal().log_()
+
+        return L
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to invert precision matrix: {e}") from e
 
 
 def build_buckets(
     trajectories: list[Traj],
 ) -> dict[tuple[int, int], tuple[torch.Tensor, ...]]:
+    """Builds buckets from trajectories for user convenience.
+
+    Args:
+        trajectories (list[Traj]): The list of individual trajectories.
+
+    Raises:
+        RuntimeError: If the construction of the buckets fails.
+
+    Returns:
+        dict[tuple[int, int], tuple[torch.Tensor, ...]]: A dictionnary of transition keys with a triplet of tensors (idxs, t0, t1).
+    """
+
     try:
         # Process each individual trajectory
         buckets: DefaultDict[tuple[int, int], list[list[Any]]] = defaultdict(
