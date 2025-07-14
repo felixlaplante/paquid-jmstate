@@ -220,10 +220,10 @@ class HazardMixin:
         # Adjust target if conditioning on existing survival
         if c is not None:
             c = c.view(-1, 1)
-            existing_hazard = self._cum_hazard(
+            cond_hazard = self._cum_hazard(
                 t0, c, x, psi, alpha, beta, log_lambda0, g
             )
-            target += existing_hazard
+            target += cond_hazard
 
         # Bisection search for survival times
         for _ in range(n_bissect):
