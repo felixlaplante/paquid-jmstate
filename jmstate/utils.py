@@ -434,7 +434,7 @@ def tril_from_flat(flat: torch.Tensor, n: int) -> torch.Tensor:
         return L
 
     except Exception as e:
-        raise RuntimeError(f"Failed to construct Cholesky factor: {e}") from e
+        raise RuntimeError(f"Failed to construct log Cholesky factor: {e}") from e
 
 
 def flat_from_tril(L: torch.Tensor) -> torch.Tensor:
@@ -464,11 +464,11 @@ def flat_from_tril(L: torch.Tensor) -> torch.Tensor:
         raise RuntimeError(f"Failed to flatten matrix: {e}") from e
 
 
-def precision_from_cholesky(L: torch.Tensor) -> torch.Tensor:
-    """Computes the inverse covariance matrix from Cholesky factor.
+def precision_from_log_cholesky(L: torch.Tensor) -> torch.Tensor:
+    """Computes the inverse covariance matrix from log Cholesky factor.
 
     Args:
-        L (torch.Tensor): Cholesky factor
+        L (torch.Tensor): log Cholesky factor
 
     Raises:
         RuntimeError: Error if the computation fails.
@@ -484,11 +484,11 @@ def precision_from_cholesky(L: torch.Tensor) -> torch.Tensor:
         return LLT
 
     except Exception as e:
-        raise RuntimeError(f"Failed to construct Cholesky: {e}") from e
+        raise RuntimeError(f"Failed to construct log Cholesky: {e}") from e
 
 
-def cholesky_from_precision(P: torch.Tensor) -> torch.Tensor:
-    """Computes the Cholesky-like factor used in precision_from_cholesky.
+def log_cholesky_from_precision(P: torch.Tensor) -> torch.Tensor:
+    """Computes the log Cholesky-like factor used in precision_from_log_cholesky.
     (with log-diagonal convention) from the inverse covariance matrix.
 
     Args:
@@ -502,7 +502,7 @@ def cholesky_from_precision(P: torch.Tensor) -> torch.Tensor:
     """
 
     try:
-        L: torch.Tensor = cast(torch.Tensor, torch.linalg.cholesky(P))  # type: ignore
+        L: torch.Tensor = cast(torch.Tensor, torch.linalg.log_cholesky(P))  # type: ignore
         L.diagonal().log_()
 
         return L
