@@ -433,6 +433,8 @@ class MultiStateJointModel(HazardMixin):
         if self.sampler_ is None:
             raise ValueError("self.sampler_ must not be None")
 
+        # Setup 
+        self.params_.require_grad(True)
         params_list = self.params_.as_list
         d = self.params_.numel
         self.fim_ = torch.zeros(d, d)
