@@ -67,7 +67,6 @@ class ModelData:
     """Class containing all multistate joint model data.
 
     Raises:
-        RuntimeError: If conversion to float32 fails.
         ValueError: If the dimensions do not match theoretical dimensions.
         ValueError: If the number of individuals is not consistent.
         ValueError: If t is not broadcastable with y.
@@ -139,7 +138,7 @@ class ModelData:
             (1, self.y.shape[1]),
             self.y.shape[:2],
         ]
-        
+
         if self.t.shape not in valid_t_shapes:
             raise ValueError("t must be broadcastable with y")
 
@@ -169,7 +168,6 @@ class SampleData:
     """Class containing all multistate joint model sampling data.
 
     Raises:
-        RuntimeError: If the conversion to float32 fails.
         ValueError: If the dimensions do not match theoretical dimensions.
         ValueError: If the number of individuals is not consistent.
         ValueError: If the number of individuals is not consistent for t_surv.
@@ -183,9 +181,6 @@ class SampleData:
     trajectories: list[Traj]
     psi: torch.Tensor
     c: torch.Tensor | None = None
-    buckets_: dict[tuple[int, int], tuple[torch.Tensor, ...]] = field(
-        init=False, repr=False
-    )
 
     def __post_init__(self):
         """Runs the post init conversions and checks."""
