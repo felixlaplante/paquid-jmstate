@@ -333,8 +333,8 @@ class MultiStateJointModel(HazardMixin):
         total_ll = torch.tensor(0.0)
 
         for _ in range(batch_size):
-            _, curr_log_prob = sampler.step()
-            total_ll += curr_log_prob.sum()
+            _, current_log_prob = sampler.step()
+            total_ll += current_log_prob.sum()
 
         avg_ll = total_ll / batch_size
         return avg_ll
@@ -372,7 +372,7 @@ class MultiStateJointModel(HazardMixin):
             cont_warmup (int, optional): The warmup step in-between each parameter changes. Defaults to 5.
         """
 
-        # Complete data
+        # Load and complete data
         self._prepare_data(data)
 
         # Set up optimizer
@@ -433,7 +433,7 @@ class MultiStateJointModel(HazardMixin):
         if self.sampler_ is None:
             raise ValueError("self.sampler_ must not be None")
 
-        # Setup 
+        # Setup
         self.params_.require_grad(True)
         params_list = self.params_.as_list
         d = self.params_.numel
@@ -442,7 +442,7 @@ class MultiStateJointModel(HazardMixin):
         for _ in tqdm(range(n_iter_fim), desc="Computing Fisher Information Matrix"):
             # Sample random effects
             self.sampler_.warmup(cont_warmup)
-            _, curr_ll = self.sampler_.step()
+            _, current_ll = self.sampler_.step()
 
             # Clear gradients
             for p in params_list:
@@ -450,7 +450,7 @@ class MultiStateJointModel(HazardMixin):
                     p.grad.zero_()
 
             # Compute gradients
-            ll = curr_ll.sum()
+            ll = current_ll.sum()
             ll.backward()  # type: ignore
 
             # Collect gradient vector
@@ -524,6 +524,65 @@ class MultiStateJointModel(HazardMixin):
 
         return ModelParams(**se)
 
+    def compute_surv_log_probs(
+        self, sample_data: SampleData, u: torch.Tensor
+    ) -> torch.Tensor:
+        """Computes log probabilites of remaining event free up to time u.
+
+        Args:
+            sample_data (SampleData): The data on which to compute the probabilities.
+            u (torch.Tensor): The time at which to evaluate the probabilities.
+
+        Raises:
+            ValueError: If u is of incorrect shape.
+
+        Returns:
+            torch.Tensor: The computed survival log probabilities.
+        """
+
+        # Convert to float32
+        u = torch.as_tensor(u, dtype=torch.float32)
+
+        # Check dims
+        if u.ndim != 2 or u.shape[0] != sample_data.size:
+            raise ValueError(
+                f"u must have shape ({sample_data.size}, eval_points), got {u.shape}"
+            )
+
+        last_states = [trajectory[-1:] for trajectory in sample_data.trajectories]
+        buckets = self._build_vec_rep(
+            last_states, torch.full((sample_data.size,), torch.inf)
+        )
+
+        nlog_probs = torch.zeros_like(u)
+
+        for key, bucket in buckets.items():
+            for k in range(u.shape[1]):
+                alpha, beta = self.params_.alphas[key], self.params_.betas[key]
+                idx, t0, _, _ = bucket
+                t1 = u[:, k]
+
+                alts_ll = self._cum_hazard(
+                    t0,
+                    t1,
+                    sample_data.x[idx],
+                    sample_data.psi[idx],
+                    alpha,
+                    beta,
+                    *self.model_design.surv[key],
+                )
+
+                # Check for invalid values
+                if alts_ll.isnan().any() or alts_ll.isinf().any():
+                    warnings.warn(f"Invalid cumulative hazard for bucket {key}")
+                    continue
+
+                nlog_probs[:, k].scatter_add_(0, idx, alts_ll)
+
+        log_probs = -nlog_probs
+
+        return log_probs
+
     def sample_trajectories(
         self,
         sample_data: SampleData,
@@ -588,7 +647,9 @@ class MultiStateJointModel(HazardMixin):
                         # Sample transition times
                         t_sample = self._sample_trajectory_step(
                             t0,
-                            t1 + 1e-8,  # Extend upper bound
+                            torch.nextafter(
+                                t1, torch.tensor(torch.inf, dtype=torch.float32)
+                            ),  # Extend upper bound
                             sample_data.x[idx],
                             sample_data.psi[idx],
                             alpha,
@@ -646,16 +707,94 @@ class MultiStateJointModel(HazardMixin):
         except Exception as e:
             raise RuntimeError(f"Error in trajectory sampling: {e}") from e
 
+    def predict_surv_log_probs(
+        self,
+        pred_data: ModelData,
+        u: torch.Tensor,
+        *,
+        n_iter_b: int,
+        step_size: float = 0.1,
+        adapt_rate: float = 0.1,
+        accept_target: float = 0.234,
+        init_warmup: int = 1000,
+        cont_warmup: int = 5,
+    ) -> list[torch.Tensor]:
+        """Predicts the survival (event free) probabilities for new individuals.
+
+        Args:
+            pred_data (ModelData): Prediction data.
+            u (torch.Tensor): The evaluation times of the probabilities.
+            n_iter_b (int): Number of iterations for random effects sampling.
+            step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
+            adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.1.
+            accept_target (float, optional): Mean acceptation target. Defaults to 0.234.
+            init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 1000.
+            cont_warmup (int, optional): The warmup step in-between each parameter changes. Defaults to 5.
+            max_length (int, optional): Maximum iterations or sampling (prevents infinite loops). Defaults to 100.
+
+        Raises:
+            ValueError: If u is of incorrect shape.
+            RuntimeError: If the computation fails.
+
+        Returns:
+            list[torch.Tensor]: A list for each b of survival probabilities.
+        """
+
+        try:
+            # Convert and check if c_max matches the right shape
+            u = torch.as_tensor(u, dtype=torch.float32)
+            if u.ndim != 2 or u.shape[0] != pred_data.size:
+                raise ValueError(
+                    "u has incorrect shape, got {u.shape}, expected {(sample_data.size, eval_points)}"
+                )
+
+            # Load and complete prediction data
+            self._prepare_data(pred_data)
+
+            # Set up MCMC for prediction
+            sampler = self._setup_mcmc(pred_data, step_size, adapt_rate, accept_target)
+
+            # Warmup MCMC
+            sampler.warmup(init_warmup)
+
+            # Generate predicted probabilites
+            predicted_log_probs: list[torch.Tensor] = []
+
+            for _ in tqdm(range(n_iter_b), desc="Predicting survival probabilities"):
+                # Sample random effects
+                sampler.warmup(cont_warmup)
+
+                current_b, _ = sampler.step()
+
+                # Transform to individual-specific parameters
+                psi = self.model_design.f(self.params_.gamma, current_b)
+
+                sample_data = SampleData(pred_data.x, pred_data.trajectories, psi)
+
+                c_log_probs = self.compute_surv_log_probs(
+                    sample_data, pred_data.c.view(-1, 1)
+                )
+                u_log_probs = self.compute_surv_log_probs(sample_data, u)
+                current_log_probs = torch.clamp(u_log_probs - c_log_probs, max=0.0)
+
+                predicted_log_probs.append(current_log_probs)
+
+            return predicted_log_probs
+
+        except Exception as e:
+            raise RuntimeError(f"Error in survival prediction: {e}") from e
+
     def predict_trajectories(
         self,
         pred_data: ModelData,
         c_max: torch.Tensor,
+        *,
         n_iter_b: int,
         n_iter_T: int,
         step_size: float = 0.1,
         adapt_rate: float = 0.1,
         accept_target: float = 0.234,
-        init_warmup: int = 500,
+        init_warmup: int = 1000,
         cont_warmup: int = 5,
         max_length: int = 100,
     ) -> list[list[list[Traj]]]:
@@ -668,8 +807,8 @@ class MultiStateJointModel(HazardMixin):
             n_iter_T (int): Number of trajectory samples per random effects sample.
             step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
             adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.1.
-            target_accept_rate (float, optional): Mean acceptation target. Defaults to 0.234.
-            init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 500.
+            accept_target (float, optional): Mean acceptation target. Defaults to 0.234.
+            init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 1000.
             cont_warmup (int, optional): The warmup step in-between each parameter changes. Defaults to 5.
             max_length (int, optional): Maximum iterations or sampling (prevents infinite loops). Defaults to 100.
 
@@ -688,7 +827,7 @@ class MultiStateJointModel(HazardMixin):
                     "c_max has incorrect shape, got {c_max.shape}, expected {(sample_data.size,)}"
                 )
 
-            # Load and validate prediction data
+            # Load and complete prediction data
             self._prepare_data(pred_data)
 
             # Set up MCMC for prediction
@@ -704,16 +843,16 @@ class MultiStateJointModel(HazardMixin):
             c_max_rep = c_max.repeat(n_iter_T)
 
             # Generate predictions
-            predictions: list[list[list[Traj]]] = []
+            predicted_trajectories: list[list[list[Traj]]] = []
 
             for _ in tqdm(range(n_iter_b), desc="Predicting trajectories"):
                 # Sample random effects
                 sampler.warmup(cont_warmup)
 
-                curr_b, _ = sampler.step()
+                current_b, _ = sampler.step()
 
                 # Transform to individual-specific parameters
-                psi = self.model_design.f(self.params_.gamma, curr_b)
+                psi = self.model_design.f(self.params_.gamma, current_b)
 
                 # Replicate for multiple trajectory samples
                 psi_rep = psi.repeat(n_iter_T, 1)
@@ -721,19 +860,19 @@ class MultiStateJointModel(HazardMixin):
                 sample_data = SampleData(x_rep, trajectories_rep, psi_rep, c_rep)
 
                 # Sample trajectories
-                trajectories = self.sample_trajectories(
+                current_trajectories = self.sample_trajectories(
                     sample_data, c_max_rep, max_length
                 )
 
                 # Organize by trajectory iteration
                 trajectory_chunks = [
-                    trajectories[i * pred_data.size : (i + 1) * pred_data.size]
+                    current_trajectories[i * pred_data.size : (i + 1) * pred_data.size]
                     for i in range(n_iter_T)
                 ]
 
-                predictions.append(trajectory_chunks)
+                predicted_trajectories.append(trajectory_chunks)
 
-            return predictions
+            return predicted_trajectories
 
         except Exception as e:
             raise RuntimeError(f"Error in survival prediction: {e}") from e
