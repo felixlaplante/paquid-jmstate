@@ -253,32 +253,29 @@ class ModelParams:
     """
 
     gamma: torch.Tensor
-    Q_info: tuple[torch.Tensor, str]
-    R_info: tuple[torch.Tensor, str]
+    Q_repr: tuple[torch.Tensor, str]
+    R_repr: tuple[torch.Tensor, str]
     alphas: dict[tuple[int, int], torch.Tensor]
     betas: dict[tuple[int, int], torch.Tensor]
-    Q_flat_: torch.Tensor = field(init=False, repr=False)
-    R_flat_: torch.Tensor = field(init=False, repr=False)
-    Q_method_: str = field(init=False, repr=False)
-    R_method_: str = field(init=False, repr=False)
     Q_dim_: int = field(init=False, repr=False)
     R_dim_: int = field(init=False, repr=False)
 
     def __post_init__(self):
         """Convert and init to float32 the parameters."""
 
-        # Init
-        self.Q_flat_, self.Q_method_ = self.Q_info
-        self.R_flat_, self.R_method_ = self.R_info
+        # Convert components to float32
+        Q_flat, Q_method = self.Q_repr
+        R_flat, R_method = self.R_repr
 
-        # Convert to float32
+        Q_flat = torch.as_tensor(Q_flat, dtype=torch.float32)
+        R_flat = torch.as_tensor(R_flat, dtype=torch.float32)
+
+        # Update representation tuples
+        self.Q_repr = (Q_flat, Q_method)
+        self.R_repr = (R_flat, R_method)
+
+        # Convert the rest to float32
         self.gamma = torch.as_tensor(self.gamma, dtype=torch.float32)
-        self.Q_flat_ = torch.as_tensor(self.Q_flat_, dtype=torch.float32)
-        self.R_flat_ = torch.as_tensor(self.R_flat_, dtype=torch.float32)
-
-        # Make pointers
-        self.Q_info = (self.Q_flat_, self.Q_method_)
-        self.R_info = (self.Q_flat_, self.Q_method_)
 
         for alpha in self.alphas.values():
             alpha = torch.as_tensor(alpha, dtype=torch.float32)
@@ -294,8 +291,6 @@ class ModelParams:
         """Runs the post init checks themselves.
 
         Raises:
-            ValueError: If Q_method_ is not in ("full", "diag", "ball").
-            ValueError: If R_method_ is not in ("full", "diag", "ball").
             ValueError: If either gamma, Q_flat_ or R_flat_ is not flat.
             ValueError: If the alphas are not flat.
             ValueError: If the betas are not flat.
@@ -303,8 +298,8 @@ class ModelParams:
 
         dim_checks = [
             (self.gamma, 1, "gamma"),
-            (self.Q_flat_, 1, "Q_flat_"),
-            (self.R_flat_, 1, "R_flat_"),
+            (self.Q_repr[0], 1, "Q_flat_"),
+            (self.Q_repr[0], 1, "R_flat_"),
         ]
 
         # Validate tensors
@@ -340,8 +335,7 @@ class ModelParams:
         if not matrix in ("Q", "R"):
             raise ValueError(f"matrix should be either Q or R, got {matrix}")
 
-        flat = getattr(self, matrix + "_flat_")
-        method = getattr(self, matrix + "_method_")
+        flat, method = getattr(self, matrix + "_repr")
 
         match method:
             case "full":
@@ -373,8 +367,8 @@ class ModelParams:
 
         # Add non-dictionary parameters
         params_list.append(self.gamma)
-        params_list.append(self.Q_flat_)
-        params_list.append(self.R_flat_)
+        params_list.append(self.Q_repr[0])
+        params_list.append(self.R_repr[0])
 
         # Add dictionary parameters
         params_list.extend(self.alphas.values())
@@ -409,9 +403,8 @@ class ModelParams:
             raise ValueError(f"matrix should be either Q or R, got {matrix}")
 
         # Get flat then log cholesky
-        flat = getattr(self, matrix + "_flat_")
+        flat, method = getattr(self, matrix + "_repr")
         n = getattr(self, matrix + "_dim_")
-        method = getattr(self, matrix + "_method_")
 
         L = log_cholesky_from_flat(flat, n, method)
         P = precision_from_log_cholesky(L)
@@ -437,9 +430,8 @@ class ModelParams:
             raise ValueError(f"matrix should be either Q or R, got {matrix}")
 
         # Get flat then log cholesky
-        flat = getattr(self, matrix + "_flat_")
+        flat, method = getattr(self, matrix + "_repr")
         n = getattr(self, matrix + "_dim_")
-        method = getattr(self, matrix + "_method_")
 
         L = log_cholesky_from_flat(flat, n, method)
         logdet = 2 * L.diag().sum()
@@ -456,8 +448,8 @@ class ModelParams:
 
         # Enable gradients for non-dictionary parameters
         self.gamma.requires_grad_(req)
-        self.Q_flat_.requires_grad_(req)
-        self.R_flat_.requires_grad_(req)
+        self.Q_repr[0].requires_grad_(req)
+        self.R_repr[0].requires_grad_(req)
 
         # Enable gradients for dictionary parameters
         for tensor in self.alphas.values():

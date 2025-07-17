@@ -1,7 +1,7 @@
 import copy
 import warnings
 from collections import defaultdict
-from typing import Any, DefaultDict, Dict, cast
+from typing import Any, DefaultDict, Dict
 
 import torch
 from tqdm import tqdm
@@ -489,36 +489,32 @@ class MultiStateJointModel(HazardMixin):
             flat_se = torch.full_like(params_flat, torch.nan)
 
         # Organize by parameter structure
-        se_dict: dict[str, Any] = {}
         i = 0
 
-        for key in ["gamma", "Q_flat_", "R_flat_", "alphas", "betas"]:
-            val = getattr(self.params_, key)
-            if isinstance(val, dict):
-                param_dict = {}
-                for subkey, subval in cast(
-                    list[tuple[tuple[int, int], torch.Tensor]], val.items()
-                ):
-                    n = subval.numel()
-                    shape = subval.shape
-                    param_dict[subkey] = flat_se[i : i + n].view(shape)
-                    i += n
-                se_dict[key] = param_dict  # assign entire dict to field
-            else:
-                n = val.numel()
-                shape = val.shape
-                se_dict[key] = flat_se[i : i + n].view(shape)  # assign tensor
-                i += n
+        def _next(ref: torch.Tensor) -> torch.Tensor:
+            nonlocal i
+            n = ref.numel()
+            result = flat_se[i : i + n].view(ref.shape)
+            i += n
+            return result
 
-        se = ModelParams(
-            se_dict["gamma"],
-            (se_dict["Q_flat_"], self.params_.Q_method_),
-            (se_dict["R_flat_"], self.params_.R_method_),
-            se_dict["alphas"],
-            se_dict["betas"],
+        gamma = _next(self.params_.gamma)
+
+        Q_flat = _next(self.params_.Q_repr[0])
+        Q_method = self.params_.Q_repr[1]
+
+        R_flat = _next(self.params_.R_repr[0])
+        R_method = self.params_.R_repr[1]
+
+        alphas = {key: _next(val) for key, val in self.params_.alphas.items()}
+
+        betas = {key: _next(val) for key, val in self.params_.betas.items()}
+
+        se_params = ModelParams(
+            gamma, (Q_flat, Q_method), (R_flat, R_method), alphas, betas
         )
 
-        return se
+        return se_params
 
     def compute_surv_log_probs(
         self, sample_data: SampleData, u: torch.Tensor
