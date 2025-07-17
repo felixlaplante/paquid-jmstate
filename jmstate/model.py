@@ -114,20 +114,14 @@ class MultiStateJointModel(HazardMixin):
         if torch.isnan(predicted).any() or torch.isinf(predicted).any():
             warnings.warn("Invalid predictions encountered in longitudinal model")
 
-        # Reconstruct precision matrix R_inv from Cholesky parametrization
-        R_inv = tril_from_flat(self.params_.R_inv, self.params_.R_dim_)
-
-        # Compute log determinant: log det = -2 * sum(log(diag(R_inv)))
-        log_det_R = -torch.diag(R_inv).sum() * 2
-
-        # Compute the precision matrix
-        R_inv = precision_from_log_cholesky(R_inv)
+        # Reconstruct precision matrix R_inv from Cholesky parametrization and logdet
+        R_inv, logdet_R = self.params_.get_precision_and_logdet("R")
 
         # Compute quadratic form: diff.T @ R_inv @ diff for each individual
         quad_form = torch.einsum("ijk,kl,ijl->i", diff, R_inv, diff)
 
-        # Log-likelihood: -0.5 * (log|R| * n_valid + quadratic_form)
-        ll = -0.5 * (log_det_R * data.n_valid_ + quad_form)
+        # Log likelihood
+        ll = 0.5 * (logdet_R * data.n_valid_ - quad_form)
 
         # Validate output
         if torch.isnan(ll).any() or torch.isinf(ll).any():
@@ -148,20 +142,14 @@ class MultiStateJointModel(HazardMixin):
             torch.Tensor: The computed log likelihood.
         """
 
-        # Reconstruct precision matrix Q_inv from Cholesky parametrization
-        Q_inv = tril_from_flat(self.params_.Q_inv, self.params_.Q_dim_)
-
-        # Compute log determinant: log det = -2 * sum(log(diag(Q_inv)))
-        log_det_Q = -torch.diag(Q_inv).sum() * 2
-
-        # Compute the precision matrix
-        Q_inv = precision_from_log_cholesky(Q_inv)
+        # Reconstruct precision matrix R_inv from Cholesky parametrization and logdet
+        Q_inv, logdet_Q = self.params_.get_precision_and_logdet("Q")
 
         # Compute quadratic form: b.T @ Q_inv @ b for each individual
         quad_form = torch.einsum("ik,kl,il->i", b, Q_inv, b)
 
-        # Log-likelihood: -0.5 * (log det + quadratic_form)
-        ll = -0.5 * (log_det_Q + quad_form)
+        # Log likelihood:
+        ll = 0.5 * (logdet_Q - quad_form)
 
         # Validate output
         if torch.isnan(ll).any() or torch.isinf(ll).any():
@@ -501,10 +489,10 @@ class MultiStateJointModel(HazardMixin):
             flat_se = torch.full_like(params_flat, torch.nan)
 
         # Organize by parameter structure
-        se: dict[str, Any] = {}
+        se_dict: dict[str, Any] = {}
         i = 0
 
-        for key in ["gamma", "Q_inv", "R_inv", "alphas", "betas"]:
+        for key in ["gamma", "Q_flat_", "R_flat_", "alphas", "betas"]:
             val = getattr(self.params_, key)
             if isinstance(val, dict):
                 param_dict = {}
@@ -515,14 +503,22 @@ class MultiStateJointModel(HazardMixin):
                     shape = subval.shape
                     param_dict[subkey] = flat_se[i : i + n].view(shape)
                     i += n
-                se[key] = param_dict  # assign entire dict to field
+                se_dict[key] = param_dict  # assign entire dict to field
             else:
                 n = val.numel()
                 shape = val.shape
-                se[key] = flat_se[i : i + n].view(shape)  # assign tensor
+                se_dict[key] = flat_se[i : i + n].view(shape)  # assign tensor
                 i += n
 
-        return ModelParams(**se)
+        se = ModelParams(
+            se_dict["gamma"],
+            (se_dict["Q_flat_"], self.params_.Q_method_),
+            (se_dict["R_flat_"], self.params_.R_method_),
+            se_dict["alphas"],
+            se_dict["betas"],
+        )
+
+        return se
 
     def compute_surv_log_probs(
         self, sample_data: SampleData, u: torch.Tensor
