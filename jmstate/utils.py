@@ -253,20 +253,32 @@ class ModelParams:
     """
 
     gamma: torch.Tensor
-    Q_inv: torch.Tensor
-    R_inv: torch.Tensor
+    Q_info: tuple[torch.Tensor, str]
+    R_info: tuple[torch.Tensor, str]
     alphas: dict[tuple[int, int], torch.Tensor]
     betas: dict[tuple[int, int], torch.Tensor]
+    Q_flat_: torch.Tensor = field(init=False, repr=False)
+    R_flat_: torch.Tensor = field(init=False, repr=False)
+    Q_method_: str = field(init=False, repr=False)
+    R_method_: str = field(init=False, repr=False)
     Q_dim_: int = field(init=False, repr=False)
     R_dim_: int = field(init=False, repr=False)
 
     def __post_init__(self):
-        """Convert to float32 the parameters."""
+        """Convert and init to float32 the parameters."""
+
+        # Init
+        self.Q_flat_, self.Q_method_ = self.Q_info
+        self.R_flat_, self.R_method_ = self.R_info
 
         # Convert to float32
         self.gamma = torch.as_tensor(self.gamma, dtype=torch.float32)
-        self.Q_inv = torch.as_tensor(self.Q_inv, dtype=torch.float32)
-        self.R_inv = torch.as_tensor(self.R_inv, dtype=torch.float32)
+        self.Q_flat_ = torch.as_tensor(self.Q_flat_, dtype=torch.float32)
+        self.R_flat_ = torch.as_tensor(self.R_flat_, dtype=torch.float32)
+
+        # Make pointers
+        self.Q_info = (self.Q_flat_, self.Q_method_)
+        self.R_info = (self.Q_flat_, self.Q_method_)
 
         for alpha in self.alphas.values():
             alpha = torch.as_tensor(alpha, dtype=torch.float32)
@@ -275,21 +287,24 @@ class ModelParams:
             beta = torch.as_tensor(beta, dtype=torch.float32)
 
         self._check()
-        self._set_dims()
+        self._set_dims("Q")
+        self._set_dims("R")
 
     def _check(self):
         """Runs the post init checks themselves.
 
         Raises:
-            ValueError: If either gamma, Q_inv or R_inv is not flat.
+            ValueError: If Q_method_ is not in ("full", "diag", "ball").
+            ValueError: If R_method_ is not in ("full", "diag", "ball").
+            ValueError: If either gamma, Q_flat_ or R_flat_ is not flat.
             ValueError: If the alphas are not flat.
             ValueError: If the betas are not flat.
         """
 
         dim_checks = [
             (self.gamma, 1, "gamma"),
-            (self.Q_inv, 1, "Q_inv"),
-            (self.R_inv, 1, "R_inv"),
+            (self.Q_flat_, 1, "Q_flat_"),
+            (self.R_flat_, 1, "R_flat_"),
         ]
 
         # Validate tensors
@@ -310,21 +325,41 @@ class ModelParams:
             if beta.ndim != 1:
                 raise ValueError(f"betas[{key}] must be 1-dimensional, got {beta.ndim}")
 
-    def _set_dims(self):
-        """Set dimensions of the matrices.
+    def _set_dims(self, matrix: str) -> None:
+        """Sets dimensions for matrix.
+
+        Args:
+            matrix (str): Either "Q" or "R".
 
         Raises:
-            ValueError: If Q_inv.numel() is not a triangular number.
-            ValueError: If R_inv.numel() is not a triangular number.
+            ValueError: If the name matrix is not "Q" nor "R".
+            ValueError: If the number of elements is not a triangular number and the method is "full".
+            ValueError: If the number of elements is not one and the method is "ball".
         """
 
-        self.Q_dim_ = (isqrt(1 + 8 * self.Q_inv.numel()) - 1) // 2
-        if (self.Q_dim_ * (self.Q_dim_ + 1)) // 2 != self.Q_inv.numel():
-            raise ValueError("Q_inv.numel() is not a triangular number")
+        if not matrix in ("Q", "R"):
+            raise ValueError(f"matrix should be either Q or R, got {matrix}")
 
-        self.R_dim_ = (isqrt(1 + 8 * self.R_inv.numel()) - 1) // 2
-        if (self.R_dim_ * (self.R_dim_ + 1)) // 2 != self.R_inv.numel():
-            raise ValueError("R_inv.numel() is not a triangular number")
+        flat = getattr(self, matrix + "_flat_")
+        method = getattr(self, matrix + "_method_")
+
+        match method:
+            case "full":
+                n = (isqrt(1 + 8 * flat.numel()) - 1) // 2
+                if (n * (n + 1)) // 2 != flat.numel():
+                    raise ValueError(
+                        f"{flat.numel()} is not a triangular number for matrix {matrix}"
+                    )
+                setattr(self, matrix + "_dim_", n)
+            case "diag":
+                n = flat.numel()
+                setattr(self, matrix + "_dim_", n)
+            case "ball":
+                if 1 != flat.numel():
+                    f"Inocrrect number of elements for flat, got {flat.numel()} but expected {1}"
+                setattr(self, matrix + "_dim_", 1)
+            case _:
+                raise ValueError(f"Got method {method} unknown for matrix {matrix}")
 
     @property
     def as_list(self) -> list[torch.Tensor]:
@@ -338,8 +373,8 @@ class ModelParams:
 
         # Add non-dictionary parameters
         params_list.append(self.gamma)
-        params_list.append(self.Q_inv)
-        params_list.append(self.R_inv)
+        params_list.append(self.Q_flat_)
+        params_list.append(self.R_flat_)
 
         # Add dictionary parameters
         params_list.extend(self.alphas.values())
@@ -357,6 +392,61 @@ class ModelParams:
 
         return sum([p.numel() for p in self.as_list])
 
+    def get_precision(self, matrix: str) -> torch.Tensor:
+        """Get precision matrix.
+
+        Args:
+            matrix (str): Either "Q" or "R".
+
+        Raises:
+            ValueError: If the matrix is not in ("Q", "R")
+
+        Returns:
+            torch.Tensor: The precision matrix.
+        """
+
+        if not matrix in ("Q", "R"):
+            raise ValueError(f"matrix should be either Q or R, got {matrix}")
+
+        # Get flat then log cholesky
+        flat = getattr(self, matrix + "_flat_")
+        n = getattr(self, matrix + "_dim_")
+        method = getattr(self, matrix + "_method_")
+
+        L = log_cholesky_from_flat(flat, n, method)
+        P = precision_from_log_cholesky(L)
+
+        return P
+
+    def get_precision_and_logdet(
+        self, matrix: str
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Get precision matrix as well as log determinant.
+
+        Args:
+            matrix (str): Either "Q" or "R".
+
+        Raises:
+            ValueError: If the matrix is not in ("Q", "R")
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: The tuple of precision matrix and log determinannt of precision.
+        """
+
+        if not matrix in ("Q", "R"):
+            raise ValueError(f"matrix should be either Q or R, got {matrix}")
+
+        # Get flat then log cholesky
+        flat = getattr(self, matrix + "_flat_")
+        n = getattr(self, matrix + "_dim_")
+        method = getattr(self, matrix + "_method_")
+
+        L = log_cholesky_from_flat(flat, n, method)
+        logdet = 2 * L.diag().sum()
+        P = precision_from_log_cholesky(L)
+
+        return P, logdet
+
     def require_grad(self, req: bool):
         """Enable gradient computation on all parameters.
 
@@ -366,8 +456,8 @@ class ModelParams:
 
         # Enable gradients for non-dictionary parameters
         self.gamma.requires_grad_(req)
-        self.Q_inv.requires_grad_(req)
-        self.R_inv.requires_grad_(req)
+        self.Q_flat_.requires_grad_(req)
+        self.R_flat_.requires_grad_(req)
 
         # Enable gradients for dictionary parameters
         for tensor in self.alphas.values():
@@ -392,18 +482,14 @@ def tril_from_flat(flat: torch.Tensor, n: int) -> torch.Tensor:
         torch.Tensor: The lower triangular matrix.
     """
 
-    try:
-        if flat.numel() != (n * (n + 1)) // 2:
-            raise ValueError("Incompatible dimensions for lower triangular matrix")
+    if flat.numel() != (n * (n + 1)) // 2:
+        raise ValueError("Incompatible dimensions for lower triangular matrix")
 
-        L = torch.zeros(n, n, dtype=flat.dtype).index_put_(
-            tuple(torch.tril_indices(n, n)), flat
-        )
+    L = torch.zeros(n, n, dtype=flat.dtype).index_put_(
+        tuple(torch.tril_indices(n, n)), flat
+    )
 
-        return L
-
-    except Exception as e:
-        raise RuntimeError(f"Failed to construct log Cholesky factor: {e}") from e
+    return L
 
 
 def flat_from_tril(L: torch.Tensor) -> torch.Tensor:
@@ -475,6 +561,47 @@ def log_cholesky_from_precision(P: torch.Tensor) -> torch.Tensor:
 
     except Exception as e:
         raise RuntimeError(f"Failed to invert precision matrix: {e}") from e
+
+
+def log_cholesky_from_flat(
+    flat: torch.Tensor, n: int, method: str = "full"
+) -> torch.Tensor:
+    """Computes log cholesky from flat tensor according to choice of method.
+
+    Args:
+        flat (torch.Tensor): The flat tensor parameter.
+        n (int): The dimension of the matrix.
+        method (str, optional): The method, either for full, diagonal or isotropic covariance matrix. Defaults to "full".
+
+    Raises:
+        ValueError: If the array is not flat.
+        ValueError: If the number of parameters is inconsistent with n.
+        ValueError: If the number of parameters does not equal one.
+
+    Returns:
+        torch.Tensor: _description_
+    """
+
+    if flat.ndim != 1:
+        raise ValueError(f"flat should be flat, got shape {flat.shape}")
+
+    match method:
+        case "full":
+            return tril_from_flat(flat, n)
+        case "diag":
+            if n != flat.numel():
+                raise ValueError(
+                    f"Inocrrect number of elements for flat, got {flat.numel()} but expected {n}"
+                )
+            return torch.diag(flat)
+        case "ball":
+            if 1 != flat.numel():
+                f"Inocrrect number of elements for flat, got {flat.numel()} but expected {1}"
+            return flat * torch.eye(n)
+        case _:
+            raise ValueError(f"Got method {method} unknown")
+
+    return P
 
 
 def build_buckets(
