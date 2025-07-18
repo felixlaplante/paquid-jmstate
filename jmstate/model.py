@@ -304,29 +304,6 @@ class MultiStateJointModel(HazardMixin):
 
         return sampler
 
-    def _mcmc_avg_ll(
-        self, sampler: MetropolisHastingsSampler, batch_size: int
-    ) -> torch.Tensor:
-        """Accumulate the mean log likelihood on a MCMC chain batch.
-
-        Args:
-            sampler (MetropolisHastingsSampler): The Markov kernel.
-            batch_size (int): The number of steps to accumulate.
-
-        Returns:
-            torch.Tensor: The mean log likelihood.
-        """
-
-        # Run batch sampling
-        total_ll = torch.tensor(0.0)
-
-        for _ in range(batch_size):
-            _, current_log_prob = sampler.step()
-            total_ll += current_log_prob.sum()
-
-        avg_ll = total_ll / batch_size
-        return avg_ll
-
     def fit(
         self,
         data: ModelData,
@@ -334,9 +311,8 @@ class MultiStateJointModel(HazardMixin):
         optimizer_params: Dict[str, Any] = {"lr": 1e-2},
         *,
         n_iter: int = 2000,
-        batch_size: int = 1,
-        callback: Any | None = None,
-        n_iter_fim: int = 1000,
+        batch_size: int = 5,
+        callback: Callable[[], None] | None = None,
         step_size: float = 0.1,
         adapt_rate: float = 0.1,
         accept_target: float = 0.234,
@@ -350,9 +326,8 @@ class MultiStateJointModel(HazardMixin):
             optimizer (type[torch.optim.Optimizer], optional): The stochastic optimizer constructor. Defaults to torch.optim.Adam.
             optimizer_params (_type_, optional): Optimizer parameter dict. Defaults to {"lr": 1e-2}.
             n_iter (int, optional): Number of iterations for optimization. Defaults to 2000.
-            batch_size (int, optional): Batch size used in fitting. Defaults to 1.
-            callback (Any | None, optional): A callback function that can be used to track the optimization. Defaults to None.
-            n_iter_fim (int, optional): Number of iterations to compute n_iter_fim. Defaults to 1000.
+            batch_size (int, optional): Batch size used in fitting. Defaults to 5.
+            callback (Callable[[], None] | None, optional): A callback function that can be used to track the optimization. Defaults to None.
             step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
             adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.1.
             target_accept_rate (float, optional): Mean acceptation target. Defaults to 0.234.
@@ -361,7 +336,15 @@ class MultiStateJointModel(HazardMixin):
         """
 
         # Load and complete data
-        self._prepare_data(data)
+        x_rep = data.x.repeat(batch_size, 1)
+        t_rep = data.t if data.t.ndim == 1 else data.t.repeat(batch_size, 1)
+        y_rep = data.y.repeat(batch_size, 1, 1)
+        trajectories_rep = data.trajectories * batch_size
+        c_rep = data.c.repeat(batch_size)
+
+        data_rep = ModelData(x_rep, t_rep, y_rep, trajectories_rep, c_rep)
+
+        self._prepare_data(data_rep)
 
         # Set up optimizer
         self.params_.require_grad(True)
@@ -369,7 +352,7 @@ class MultiStateJointModel(HazardMixin):
         optimizer_instance = optimizer(params=params_list, **optimizer_params)
 
         # Set up MCMC
-        self.sampler_ = self._setup_mcmc(data, step_size, adapt_rate, accept_target)
+        self.sampler_ = self._setup_mcmc(data_rep, step_size, adapt_rate, accept_target)
 
         # Warmup MCMC
         self.sampler_.warmup(init_warmup)
@@ -379,11 +362,11 @@ class MultiStateJointModel(HazardMixin):
             try:
                 # MCMC: Sample random effects
                 self.sampler_.warmup(cont_warmup)
-                avg_ll = self._mcmc_avg_ll(self.sampler_, batch_size)
+                _, current_ll = self.sampler_.step()
 
                 # Optimization step: Update parameters
                 optimizer_instance.zero_grad()
-                nll = -avg_ll
+                nll = -current_ll.sum() / batch_size
                 nll.backward()  # type: ignore
 
                 optimizer_instance.step()
@@ -399,15 +382,27 @@ class MultiStateJointModel(HazardMixin):
         # Set fit_ to True
         self.fit_ = True
 
-        # Compute Fisher Information Matrix
-        self._compute_fim(n_iter_fim, cont_warmup)
-
-    def _compute_fim(self, n_iter_fim: int, cont_warmup: int) -> None:
+    def _compute_fim(
+        self,
+        data: ModelData,
+        *,
+        n_iter_fim: int = 500,
+        step_size: float = 0.1,
+        adapt_rate: float = 0.1,
+        accept_target: float = 0.234,
+        init_warmup: int = 500,
+        cont_warmup: int = 5,
+    ) -> None:
         """Computes the Fisher Information Matrix.
 
         Args:
-            n_iter_fim (int): Number of iterations to calculate Fisher Information Matrix.
-            cont_warmup (int): The number of in-between warmup steps.
+            data (ModelData): The dataset to learn from. Should be the same as used in fit.
+            n_iter_fim (int, optional): Number of iterations to compute n_iter_fim. Defaults to 500.
+            step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
+            adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.1.
+            target_accept_rate (float, optional): Mean acceptation target. Defaults to 0.234.
+            init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 500.
+            cont_warmup (int, optional): The warmup step in-between each parameter changes. Defaults to 5.
 
         Raises:
             ValueError: If self.sampler_ is None.
@@ -418,8 +413,11 @@ class MultiStateJointModel(HazardMixin):
                 "Model should be fit before computing Fisher Information Matrix"
             )
 
-        if self.sampler_ is None:
-            raise ValueError("self.sampler_ must not be None")
+        # Set up MCMC for prediction
+        sampler = self._setup_mcmc(data, step_size, adapt_rate, accept_target)
+
+        # Warmup MCMC
+        sampler.warmup(init_warmup)
 
         # Setup
         self.params_.require_grad(True)
@@ -429,8 +427,8 @@ class MultiStateJointModel(HazardMixin):
 
         for _ in tqdm(range(n_iter_fim), desc="Computing Fisher Information Matrix"):
             # Sample random effects
-            self.sampler_.warmup(cont_warmup)
-            _, current_ll = self.sampler_.step()
+            sampler.warmup(cont_warmup)
+            _, current_ll = sampler.step()
 
             # Clear gradients
             for p in params_list:
@@ -472,7 +470,7 @@ class MultiStateJointModel(HazardMixin):
         # Check if self.fim_ is well defined
         if self.fim_ is None:
             raise ValueError(
-                "Fisher Information Matrix inference failed. CIs may not be computed."
+                "Fisher Information Matrix must be previously computed. CIs may not be computed."
             )
 
         # Get parameter vector
@@ -708,7 +706,7 @@ class MultiStateJointModel(HazardMixin):
         step_size: float = 0.1,
         adapt_rate: float = 0.1,
         accept_target: float = 0.234,
-        init_warmup: int = 1000,
+        init_warmup: int = 500,
         cont_warmup: int = 5,
     ) -> list[torch.Tensor]:
         """Predicts the survival (event free) probabilities for new individuals.
@@ -720,7 +718,7 @@ class MultiStateJointModel(HazardMixin):
             step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
             adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.1.
             accept_target (float, optional): Mean acceptation target. Defaults to 0.234.
-            init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 1000.
+            init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 500.
             cont_warmup (int, optional): The warmup step in-between each parameter changes. Defaults to 5.
             max_length (int, optional): Maximum iterations or sampling (prevents infinite loops). Defaults to 100.
 
@@ -786,7 +784,7 @@ class MultiStateJointModel(HazardMixin):
         step_size: float = 0.1,
         adapt_rate: float = 0.1,
         accept_target: float = 0.234,
-        init_warmup: int = 1000,
+        init_warmup: int = 500,
         cont_warmup: int = 5,
         max_length: int = 100,
     ) -> list[list[list[Traj]]]:
@@ -800,7 +798,7 @@ class MultiStateJointModel(HazardMixin):
             step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
             adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.1.
             accept_target (float, optional): Mean acceptation target. Defaults to 0.234.
-            init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 1000.
+            init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 500.
             cont_warmup (int, optional): The warmup step in-between each parameter changes. Defaults to 5.
             max_length (int, optional): Maximum iterations or sampling (prevents infinite loops). Defaults to 100.
 

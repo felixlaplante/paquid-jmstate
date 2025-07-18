@@ -133,14 +133,15 @@ class ModelData:
             raise ValueError("Inconsistent number of individuals")
 
         # Validate time dimension compatibility
-        valid_t_shapes = [
+        valid_t_shapes = (
             (self.y.shape[1],),
-            (1, self.y.shape[1]),
             self.y.shape[:2],
-        ]
+        )
 
         if self.t.shape not in valid_t_shapes:
-            raise ValueError("t must be broadcastable with y")
+            raise ValueError(
+                f"t must have shape like {valid_t_shapes}, got {self.t.shape}"
+            )
 
         if (
             self.t.shape == self.y.shape[:2]
