@@ -106,9 +106,10 @@ class ModelData:
 
         Raises:
             ValueError: If the dimensions do not match theoretical dimensions.
+            ValueError: If any tensor contain inf.
             ValueError: If the number of individuals is not consistent.
             ValueError: If t is not broadcastable with y.
-            ValueError: If t contains NaNs where y is not.
+            ValueError: If t contains NaNs where y is not or contains inf.
             ValueError: If trajectories are not sorted.
         """
 
@@ -124,6 +125,8 @@ class ModelData:
                 raise ValueError(
                     f"{name} must be {expected_dim}-dimensional, got {tensor.ndim}"
                 )
+            if tensor.isinf().any():
+                raise ValueError(f"{name} must not contain infinite values")
 
         # Validate consistent number of individuals
         n = self.size
@@ -145,9 +148,9 @@ class ModelData:
 
         if (
             self.t.shape == self.y.shape[:2]
-            and (~self.y.isnan().all(dim=2) & self.t.isnan()).any()
+            and (~self.y.isnan().all(dim=2) & (self.t.isnan() | self.t.isinf())).any()
         ):
-            raise ValueError("t must not be torch.nan where y is not")
+            raise ValueError("t must not be torch.inf or torch.nan where y is not")
         if not all(
             all(t0 <= t1 for (t0, _), (t1, _) in zip(trajectory[:-1], trajectory[1:]))
             for trajectory in self.trajectories
@@ -170,6 +173,7 @@ class SampleData:
 
     Raises:
         ValueError: If the dimensions do not match theoretical dimensions.
+        ValueError: If any tensor contain inf.
         ValueError: If the number of individuals is not consistent.
         ValueError: If the number of individuals is not consistent for t_surv.
         ValueError: If trajectories are not sorted.
@@ -213,10 +217,14 @@ class SampleData:
         ]
 
         for tensor, expected_dim, name in dim_checks:
-            if tensor is not None and tensor.ndim != expected_dim:
+            if tensor is None:
+                continue
+            if tensor.ndim != expected_dim:
                 raise ValueError(
                     f"{name} must be {expected_dim}-dimensional, got {tensor.ndim}"
                 )
+            if tensor.isinf().any():
+                raise ValueError(f"{name} must not contain infinite values")
 
         # Validate consistent number of individuals
         n = self.size
