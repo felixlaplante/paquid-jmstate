@@ -145,7 +145,7 @@ class ModelData:
 
         if (
             self.t.shape == self.y.shape[:2]
-            and (~self.y.isnan().any(dim=2) & self.t.isnan()).any()
+            and (~self.y.isnan().all(dim=2) & self.t.isnan()).any()
         ):
             raise ValueError("t must not be torch.nan where y is not")
         if not all(
