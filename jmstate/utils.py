@@ -64,14 +64,17 @@ class ModelDesign:
 
 @dataclass
 class ModelData:
-    """Class containing all multistate joint model data.
+    """Dataclass containing learnable multistate joint model data.
 
     Raises:
-        ValueError: If the dimensions do not match theoretical dimensions.
-        ValueError: If the number of individuals is not consistent.
-        ValueError: If t is not broadcastable with y.
-        ValueError: If t contains NaNs where y is not.
-        ValueError: If trajectories are not sorted.
+        ValueError: If any tensor contains inf values.
+        ValueError: If c is not 1D.
+        ValueError: If x is not 2D.
+        ValueError: If y is not 3D.
+        ValueError: If the number of individuals is inconsistent.
+        ValueError: If the shape of t is not broadcastable with y.
+        ValueError: If t contains torch.nan where y is not.
+        ValueError: If the trajectories are not sorted by time.
 
     Returns:
         _type_: The instance.
@@ -102,60 +105,60 @@ class ModelData:
         self._check()
 
     def _check(self):
-        """Runs the checks themselves.
+        """Validate tensor dimensions and consistency.
 
         Raises:
-            ValueError: If the dimensions do not match theoretical dimensions.
-            ValueError: If any tensor contain inf.
-            ValueError: If the number of individuals is not consistent.
-            ValueError: If t is not broadcastable with y.
-            ValueError: If t contains NaNs where y is not or contains inf.
-            ValueError: If trajectories are not sorted.
+            ValueError: If any tensor contains inf values.
+            ValueError: If c is not 1D.
+            ValueError: If x is not 2D.
+            ValueError: If y is not 3D.
+            ValueError: If the number of individuals is inconsistent.
+            ValueError: If the shape of t is not broadcastable with y.
+            ValueError: If t contains torch.nan where y is not.
+            ValueError: If the trajectories are not sorted by time.
         """
 
-        # Validate tensor dimensions
-        dim_checks = [
-            (self.c, 1, "c"),
-            (self.x, 2, "x"),
-            (self.y, 3, "y"),
-        ]
-
-        for tensor, expected_dim, name in dim_checks:
-            if tensor.ndim != expected_dim:
-                raise ValueError(
-                    f"{name} must be {expected_dim}-dimensional, got {tensor.ndim}"
-                )
+        # Check for inf tensors
+        for name, tensor in [
+            ("c", self.c),
+            ("x", self.x),
+            ("y", self.y),
+            ("t", self.t),
+        ]:
             if tensor.isinf().any():
-                raise ValueError(f"{name} must not contain infinite values")
+                raise ValueError(f"{name} cannot contain inf values")
 
-        # Validate consistent number of individuals
+        # Check dimensions
+        if self.c.ndim != 1:
+            raise ValueError(f"c must be 1D, got {self.c.ndim}D")
+        if self.x.ndim != 2:
+            raise ValueError(f"x must be 2D, got {self.x.ndim}D")
+        if self.y.ndim != 3:
+            raise ValueError(f"y must be 3D, got {self.y.ndim}D")
+
+        # Check consistent size
         n = self.size
         if not (
             self.y.shape[0] == n and len(self.trajectories) == n and self.c.numel() == n
         ):
             raise ValueError("Inconsistent number of individuals")
 
-        # Validate time dimension compatibility
-        valid_t_shapes = (
-            (self.y.shape[1],),
-            self.y.shape[:2],
-        )
+        # Check time compatibility
+        if self.t.shape not in [(self.y.shape[1],), self.y.shape[:2]]:
+            raise ValueError(f"Invalid t shape: {self.t.shape}")
 
-        if self.t.shape not in valid_t_shapes:
-            raise ValueError(
-                f"t must have shape like {valid_t_shapes}, got {self.t.shape}"
-            )
-
+        # Check for NaNs in t where y is valid
         if (
             self.t.shape == self.y.shape[:2]
-            and (~self.y.isnan().all(dim=2) & (self.t.isnan() | self.t.isinf())).any()
+            and (~self.y.isnan().all(dim=2) & self.t.isnan()).any()
         ):
-            raise ValueError("t must not be torch.inf or torch.nan where y is not")
-        if not all(
-            all(t0 <= t1 for (t0, _), (t1, _) in zip(trajectory[:-1], trajectory[1:]))
-            for trajectory in self.trajectories
-        ):
-            raise ValueError(f"All trajectories bust be sorted in their first argument")
+            raise ValueError("t cannot be NaN where y is valid")
+
+        # Check trajectory sorting
+        for trajectory in self.trajectories:
+            times = [t for t, _ in trajectory]
+            if times != sorted(times):
+                raise ValueError("Trajectories must be sorted by time")
 
     @property
     def size(self) -> int:
@@ -169,17 +172,18 @@ class ModelData:
 
 @dataclass
 class SampleData:
-    """Class containing all multistate joint model sampling data.
+    """Dataclass for data used in sampling.
 
     Raises:
-        ValueError: If the dimensions do not match theoretical dimensions.
-        ValueError: If any tensor contain inf.
-        ValueError: If the number of individuals is not consistent.
-        ValueError: If the number of individuals is not consistent for t_surv.
-        ValueError: If trajectories are not sorted.
+        ValueError: If any tensor contains inf values.
+        ValueError: If c is not 1D or None.
+        ValueError: If x is not 2D.
+        ValueError: If psi is not 2D.
+        ValueError: If the number of individuals is inconsistent.
+        ValueError: If the trajectories are not sorted by time.
 
     Returns:
-        _type_: _description_
+        _type_: The instance.
     """
 
     x: torch.Tensor
@@ -200,33 +204,31 @@ class SampleData:
         self._check()
 
     def _check(self):
-        """Runs the post init checks themselves.
+        """Validate tensor dimensions and consistency.
 
         Raises:
-            ValueError: If the dimensions do not match theoretical dimensions.
-            ValueError: If the number of individuals is not consistent.
-            ValueError: If the number of individuals is not consistent for t_surv.
-            ValueError: If trajectories are not sorted.
+            ValueError: If any tensor contains inf values.
+            ValueError: If c is not 1D or None.
+            ValueError: If x is not 2D.
+            ValueError: If psi is not 2D.
+            ValueError: If the number of individuals is inconsistent.
+            ValueError: If the trajectories are not sorted by time.
         """
 
-        # Validate tensor dimensions
-        dim_checks = [
-            (self.c, 1, "c"),
-            (self.x, 2, "x"),
-            (self.psi, 2, "psi"),
-        ]
+        # Check for inf tensors
+        for name, tensor in [("c", self.c), ("x", self.x), ("psi", self.psi)]:
+            if tensor is not None and tensor.isinf().any():
+                raise ValueError(f"{name} cannot contain inf values")
 
-        for tensor, expected_dim, name in dim_checks:
-            if tensor is None:
-                continue
-            if tensor.ndim != expected_dim:
-                raise ValueError(
-                    f"{name} must be {expected_dim}-dimensional, got {tensor.ndim}"
-                )
-            if tensor.isinf().any():
-                raise ValueError(f"{name} must not contain infinite values")
+        # Check dimensions
+        if self.c is not None and self.c.ndim != 1:
+            raise ValueError(f"c must be 1D, got {self.c.ndim}D")
+        if self.x.ndim != 2:
+            raise ValueError(f"x must be 2D, got {self.x.ndim}D")
+        if self.psi.ndim != 2:
+            raise ValueError(f"psi must be 2D, got {self.psi.ndim}D")
 
-        # Validate consistent number of individuals
+        # Check consistent size
         n = self.size
         if not (
             self.psi.shape[0] == n
@@ -234,11 +236,12 @@ class SampleData:
             and (self.c is None or self.c.numel() == n)
         ):
             raise ValueError("Inconsistent number of individuals")
-        if not all(
-            all(t0 <= t1 for (t0, _), (t1, _) in zip(trajectory[:-1], trajectory[1:]))
-            for trajectory in self.trajectories
-        ):
-            raise ValueError(f"All trajectories bust be sorted in their first argument")
+
+        # Check trajectory sorting
+        for trajectory in self.trajectories:
+            times = [t for t, _ in trajectory]
+            if times != sorted(times):
+                raise ValueError("Trajectories must be sorted by time")
 
     @property
     def size(self) -> int:
@@ -252,10 +255,20 @@ class SampleData:
 
 @dataclass
 class ModelParams:
-    """A class containing model optimizable parameters.
+    """Dataclass containing model parameters.
 
     Raises:
-        AttributeError: If not all parameters are not set.
+        ValueError: If any of the main tensors contains inf.
+        ValueError: If any of the main tensors is not 1D.
+        ValueError: If any of the alpha tensors contains inf.
+        ValueError: If any of the alpha tensors is not 1D.
+        ValueError: If any of the beta tensors contains inf.
+        ValueError: If any of the beta tensors is not 1D.
+        ValueError: If the name matrix is not "Q" nor "R".
+        ValueError: If the number of elements is not a triangular number and the method is "full".
+        ValueError: If the number of elements is not one and the method is "ball".
+        ValueError: If the name matrix is not "Q" nor "R".
+        ValueError: If the name matrix is not "Q" nor "R".
 
     Returns:
         _type_: The instance.
@@ -297,37 +310,40 @@ class ModelParams:
         self._set_dims("R")
 
     def _check(self):
-        """Runs the post init checks themselves.
+        """Validate all tensors are 1D and don't contain inf.
 
         Raises:
-            ValueError: If either gamma, Q_flat_ or R_flat_ is not flat.
-            ValueError: If the alphas are not flat.
-            ValueError: If the betas are not flat.
+            ValueError: If any of the main tensors contains inf.
+            ValueError: If any of the main tensors is not 1D.
+            ValueError: If any of the alpha tensors contains inf.
+            ValueError: If any of the alpha tensors is not 1D.
+            ValueError: If any of the beta tensors contains inf.
+            ValueError: If any of the beta tensors is not 1D.
         """
 
-        dim_checks = [
-            (self.gamma, 1, "gamma"),
-            (self.Q_repr[0], 1, "Q_flat_"),
-            (self.Q_repr[0], 1, "R_flat_"),
-        ]
-
-        # Validate tensors
-        for tensor, expected_dim, name in dim_checks:
-            if tensor.ndim != expected_dim:
-                raise ValueError(
-                    f"{name} must be {expected_dim}-dimensional, got {tensor.ndim}"
-                )
+        # Check main tensors
+        for name, tensor in [
+            ("gamma", self.gamma),
+            ("Q_flat_", self.Q_repr[0]),
+            ("R_flat_", self.R_repr[0]),
+        ]:
+            if tensor.isinf().any():
+                raise ValueError(f"{name} contains inf")
+            if tensor.ndim != 1:
+                raise ValueError(f"{name} must be 1D")
 
         # Check dictionary tensors
         for key, alpha in self.alphas.items():
+            if alpha.isinf().any():
+                raise ValueError(f"alpha {key} contains inf")
             if alpha.ndim != 1:
-                raise ValueError(
-                    f"alphas[{key}] must be 1-dimensional, got {alpha.ndim}"
-                )
+                raise ValueError(f"alpha {key} must be 1D")
 
         for key, beta in self.betas.items():
+            if beta.isinf().any():
+                raise ValueError(f"beta {key} contains inf")
             if beta.ndim != 1:
-                raise ValueError(f"betas[{key}] must be 1-dimensional, got {beta.ndim}")
+                raise ValueError(f"beta {key} must be 1D")
 
     def _set_dims(self, matrix: str) -> None:
         """Sets dimensions for matrix.
@@ -590,13 +606,13 @@ def log_cholesky_from_flat(
         case "full":
             return tril_from_flat(flat, n)
         case "diag":
-            if n != flat.numel():
+            if flat.numel() != n:
                 raise ValueError(
                     f"Inocrrect number of elements for flat, got {flat.numel()} but expected {n}"
                 )
             return torch.diag(flat)
         case "ball":
-            if 1 != flat.numel():
+            if flat.numel() != 1:
                 f"Inocrrect number of elements for flat, got {flat.numel()} but expected {1}"
             return flat * torch.eye(n)
         case _:
