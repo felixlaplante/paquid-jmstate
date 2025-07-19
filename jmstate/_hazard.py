@@ -57,18 +57,19 @@ class HazardMixin:
         base = log_lambda0(t1, t0)
 
         # Compute time-varying effects
-        mod = g(t1, x, psi)
+        mod = torch.einsum("ijk,k->ij", g(t1, x, psi), alpha)
 
-        # Validate g output
-        if torch.isnan(mod).any() or torch.isinf(mod).any():
-            warnings.warn("Invalid values in g(t,x,psi)")
+        # Compute covariates effect
+        cov = x @ beta.unsqueeze(1)
 
-        # Compute log hazard
-        log_hazard = (
-            base + torch.einsum("ijk,k->ij", mod, alpha) + x @ beta.unsqueeze(1)
-        )
+        # Compute the total
+        log_hazard_vals = base + mod + cov
 
-        return log_hazard
+        # Check for numerical issues
+        if torch.isnan(log_hazard_vals).any() or torch.isinf(log_hazard_vals).any():
+            warnings.warn("Numerical issues in log hazard computation")
+
+        return log_hazard_vals
 
     def _cum_hazard(
         self,
@@ -118,9 +119,9 @@ class HazardMixin:
             warnings.warn("Numerical issues in hazard computation")
             hazard_vals = torch.nan_to_num(hazard_vals, nan=0.0, posinf=1e10)
 
-        integral = half.flatten() * (hazard_vals * self._std_weights).sum(dim=1)
+        integral_vals = half.flatten() * (hazard_vals * self._std_weights).sum(dim=1)
 
-        return integral
+        return integral_vals
 
     def _log_and_cum_hazard(
         self,
@@ -166,15 +167,15 @@ class HazardMixin:
         temp = self._log_hazard(t0, ts, x, psi, alpha, beta, log_lambda0, g)
 
         # Extract log hazard at endpoint and quadrature points
-        log_hazard = temp[:, :1]  # Log hazard at t1
+        log_hazard_vals = temp[:, :1]  # Log hazard at t1
         quad_vals = torch.exp(
             torch.clamp(temp[:, 1:], min=-50.0, max=50.0)
         )  # Hazard at quadrature points
 
         # Compute cumulative hazard using quadrature
-        integral = half.flatten() * (quad_vals * self._std_weights).sum(dim=1)
+        integral_vals = half.flatten() * (quad_vals * self._std_weights).sum(dim=1)
 
-        return log_hazard.flatten(), integral
+        return log_hazard_vals.flatten(), integral_vals
 
     def _sample_trajectory_step(
         self,
@@ -220,9 +221,7 @@ class HazardMixin:
         # Adjust target if conditioning on existing survival
         if c is not None:
             c = c.view(-1, 1)
-            cond_hazard = self._cum_hazard(
-                t0, c, x, psi, alpha, beta, log_lambda0, g
-            )
+            cond_hazard = self._cum_hazard(t0, c, x, psi, alpha, beta, log_lambda0, g)
             target += cond_hazard
 
         # Bisection search for survival times

@@ -412,10 +412,10 @@ class ModelParams:
 
         return P
 
-    def get_precision_and_logdet(
+    def get_precision_and_log_eigvals(
         self, matrix: str
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Get precision matrix as well as log determinant.
+        """Get precision matrix as well as log eigenvalues.
 
         Args:
             matrix (str): Either "Q" or "R".
@@ -424,7 +424,7 @@ class ModelParams:
             ValueError: If the matrix is not in ("Q", "R")
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: The tuple of precision matrix and log determinannt of precision.
+            tuple[torch.Tensor, torch.Tensor]: The tuple of precision matrix and log eigenvalues of precision.
         """
 
         if not matrix in ("Q", "R"):
@@ -435,10 +435,10 @@ class ModelParams:
         n = getattr(self, matrix + "_dim_")
 
         L = log_cholesky_from_flat(flat, n, method)
-        logdet = 2 * L.diag().sum()
+        eigvals = 2 * L.diagonal()
         P = precision_from_log_cholesky(L)
 
-        return P, logdet
+        return P, eigvals
 
     def require_grad(self, req: bool):
         """Enable gradient computation on all parameters.
@@ -543,7 +543,7 @@ def log_cholesky_from_precision(P: torch.Tensor) -> torch.Tensor:
         RuntimeError: Error if the computation fails.
 
     Returns:
-        torch.Tensor: Lower-triangular matrix L such that L.diag().exp() @ L.diag().exp().T = P
+        torch.Tensor: Lower-triangular matrix L such that L.diagonal().exp() @ L.diagonal().exp().T = P
     """
 
     try:

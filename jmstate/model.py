@@ -115,13 +115,16 @@ class MultiStateJointModel(HazardMixin):
             warnings.warn("Invalid predictions encountered in longitudinal model")
 
         # Reconstruct precision matrix R_inv from Cholesky parametrization and logdet
-        R_inv, logdet_R = self.params_.get_precision_and_logdet("R")
+        R_inv, R_eigvals = self.params_.get_precision_and_log_eigvals("R")
 
         # Compute quadratic form: diff.T @ R_inv @ diff for each individual
-        quad_form = torch.einsum("ijk,kl,ijl->i", diff, R_inv, diff)
+        R_quad_forms = torch.einsum("ijk,kl,ijl->i", diff, R_inv, diff)
+
+        # Compute total log det for each individual
+        R_log_dets = torch.einsum("ij,j->i", data.n_valid_, R_eigvals)
 
         # Log likelihood
-        ll = 0.5 * (logdet_R * data.n_valid_ - quad_form)
+        ll = 0.5 * (R_log_dets - R_quad_forms)
 
         # Validate output
         if torch.isnan(ll).any() or torch.isinf(ll).any():
@@ -143,13 +146,16 @@ class MultiStateJointModel(HazardMixin):
         """
 
         # Reconstruct precision matrix R_inv from Cholesky parametrization and logdet
-        Q_inv, logdet_Q = self.params_.get_precision_and_logdet("Q")
+        Q_inv, Q_eigvals = self.params_.get_precision_and_log_eigvals("Q")
 
         # Compute quadratic form: b.T @ Q_inv @ b for each individual
-        quad_form = torch.einsum("ik,kl,il->i", b, Q_inv, b)
+        Q_quad_forms = torch.einsum("ik,kl,il->i", b, Q_inv, b)
+
+        # Compute log det 
+        Q_log_det = Q_eigvals.sum()
 
         # Log likelihood:
-        ll = 0.5 * (logdet_Q - quad_form)
+        ll = 0.5 * (Q_log_det - Q_quad_forms)
 
         # Validate output
         if torch.isnan(ll).any() or torch.isinf(ll).any():
@@ -266,7 +272,7 @@ class MultiStateJointModel(HazardMixin):
 
         # Add derived quantities
         data.valid_mask_ = ~torch.isnan(data.y)
-        data.n_valid_ = data.valid_mask_.any(dim=2).sum(dim=1)
+        data.n_valid_ = data.valid_mask_.sum(dim=1)
         data.valid_t_ = torch.nan_to_num(data.t)
         data.valid_y_ = torch.nan_to_num(data.y)
         data.buckets_ = self._build_vec_rep(data.trajectories, data.c)
