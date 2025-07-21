@@ -117,11 +117,10 @@ class HazardMixin:
         # Check for numerical issues
         if torch.isnan(hazard_vals).any() or torch.isinf(hazard_vals).any():
             warnings.warn("Numerical issues in hazard computation")
-            hazard_vals = torch.nan_to_num(hazard_vals, nan=0.0, posinf=1e10)
 
-        integral_vals = half.flatten() * (hazard_vals * self._std_weights).sum(dim=1)
+        cum_hazard_vals = half.flatten() * (hazard_vals * self._std_weights).sum(dim=1)
 
-        return integral_vals
+        return cum_hazard_vals
 
     def _log_and_cum_hazard(
         self,
@@ -168,14 +167,14 @@ class HazardMixin:
 
         # Extract log hazard at endpoint and quadrature points
         log_hazard_vals = temp[:, :1]  # Log hazard at t1
-        quad_vals = torch.exp(
+        hazard_vals = torch.exp(
             torch.clamp(temp[:, 1:], min=-50.0, max=50.0)
         )  # Hazard at quadrature points
 
         # Compute cumulative hazard using quadrature
-        integral_vals = half.flatten() * (quad_vals * self._std_weights).sum(dim=1)
+        cum_hazard_vals = half.flatten() * (hazard_vals * self._std_weights).sum(dim=1)
 
-        return log_hazard_vals.flatten(), integral_vals
+        return log_hazard_vals.flatten(), cum_hazard_vals
 
     def _sample_trajectory_step(
         self,
