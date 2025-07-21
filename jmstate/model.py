@@ -130,13 +130,13 @@ class MultiStateJointModel(HazardMixin):
             warnings.warn("Invalid predictions encountered in longitudinal model")
 
         # Reconstruct precision matrix R_inv from Cholesky parametrization and logdet
-        R_inv, R_eigvals = self.params_.get_precision_and_log_eigvals("R")
+        R_inv, R_log_eigvals = self.params_.get_precision_and_log_eigvals("R")
 
         # Compute quadratic form: diff.T @ R_inv @ diff for each individual
         R_quad_forms = torch.einsum("ijk,kl,ijl->i", diff, R_inv, diff)
 
         # Compute total log det for each individual
-        R_log_dets = torch.einsum("ij,j->i", data.n_valid_, R_eigvals)
+        R_log_dets = torch.einsum("ij,j->i", data.n_valid_, R_log_eigvals)
 
         # Log likelihood
         ll = 0.5 * (R_log_dets - R_quad_forms)
@@ -161,13 +161,13 @@ class MultiStateJointModel(HazardMixin):
         """
 
         # Reconstruct precision matrix R_inv from Cholesky parametrization and logdet
-        Q_inv, Q_eigvals = self.params_.get_precision_and_log_eigvals("Q")
+        Q_inv, Q_log_eigvals = self.params_.get_precision_and_log_eigvals("Q")
 
         # Compute quadratic form: b.T @ Q_inv @ b for each individual
         Q_quad_forms = torch.einsum("ik,kl,il->i", b, Q_inv, b)
 
         # Compute log det
-        Q_log_det = Q_eigvals.sum()
+        Q_log_det = Q_log_eigvals.sum()
 
         # Log likelihood:
         ll = 0.5 * (Q_log_det - Q_quad_forms)
