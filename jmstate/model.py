@@ -385,8 +385,8 @@ class MultiStateJointModel(HazardMixin):
 
                 # Optimization step: Update parameters
                 optimizer_instance.zero_grad()
-                nll = -current_ll.sum() / batch_size + self.pen(self.params_)
-                nll.backward()  # type: ignore
+                nll_pen = -current_ll.sum() / batch_size + self.pen(self.params_)
+                nll_pen.backward()  # type: ignore
 
                 optimizer_instance.step()
 
@@ -448,6 +448,7 @@ class MultiStateJointModel(HazardMixin):
             # Sample random effects
             sampler.warmup(cont_warmup)
             _, current_ll = sampler.step()
+            nll_pen = -current_ll.sum() + self.pen(self.params_)
 
             # Clear gradients
             for p in params_list:
@@ -455,8 +456,7 @@ class MultiStateJointModel(HazardMixin):
                     p.grad.zero_()
 
             # Compute gradients
-            ll = current_ll.sum()
-            ll.backward()  # type: ignore
+            nll_pen.backward()  # type: ignore
 
             # Collect gradient vector
             grad_chunks: list[torch.Tensor] = []
