@@ -30,24 +30,24 @@ class HazardMixin:
         self,
         t0: torch.Tensor,
         t1: torch.Tensor,
-        x: torch.Tensor,
+        x: torch.Tensor | None,
         psi: torch.Tensor,
         alpha: torch.Tensor,
-        beta: torch.Tensor,
-        log_lambda0: BaseFun,
-        g: LinkFun,
+        beta: torch.Tensor | None,
+        log_lambda0: BaseHazardFn,
+        g: LinkFn,
     ) -> torch.Tensor:
         """Computes log hazard.
 
         Args:
             t0 (torch.Tensor): Start time.
             t1 (torch.Tensor): End time.
-            x (torch.Tensor): Covariates.
+            x (torch.Tensor | None): Covariates.
             psi (torch.Tensor): Inidivual parameters.
             alpha (torch.Tensor): Link linear parameters.
             beta (torch.Tensor): Covariate linear parameters.
-            log_lambda0 (BaseFun): Base hazard function.
-            g (LinkFun): Link function.
+            log_lambda0 (BaseHazardFn): Base hazard function.
+            g (LinkFn): Link function.
 
         Returns:
             torch.Tensor: The computed log hazard.
@@ -60,7 +60,11 @@ class HazardMixin:
         mod = torch.einsum("ijk,k->ij", g(t1, x, psi), alpha)
 
         # Compute covariates effect
-        cov = x @ beta.unsqueeze(1)
+        cov = (
+            x @ beta.unsqueeze(1)
+            if x is not None and beta is not None
+            else torch.tensor(0.0, dtype=torch.float32)
+        )
 
         # Compute the total
         log_hazard_vals = base + mod + cov
@@ -75,24 +79,24 @@ class HazardMixin:
         self,
         t0: torch.Tensor,
         t1: torch.Tensor,
-        x: torch.Tensor,
+        x: torch.Tensor | None,
         psi: torch.Tensor,
         alpha: torch.Tensor,
-        beta: torch.Tensor,
-        log_lambda0: BaseFun,
-        g: LinkFun,
+        beta: torch.Tensor | None,
+        log_lambda0: BaseHazardFn,
+        g: LinkFn,
     ) -> torch.Tensor:
         """Computes cumulative hazard.
 
         Args:
             t0 (torch.Tensor): Start time.
             t1 (torch.Tensor): End time.
-            x (torch.Tensor): Covariates.
+            x (torch.Tensor | None): Covariates.
             psi (torch.Tensor): Inidivual parameters.
             alpha (torch.Tensor): Link linear parameters.
             beta (torch.Tensor): Covariate linear parameters.
-            log_lambda0 (BaseFun): Base hazard function.
-            g (LinkFun): Link function.
+            log_lambda0 (BaseHazardFn): Base hazard function.
+            g (LinkFn): Link function.
 
         Returns:
             torch.Tensor: The computed cumulative hazard.
@@ -126,24 +130,24 @@ class HazardMixin:
         self,
         t0: torch.Tensor,
         t1: torch.Tensor,
-        x: torch.Tensor,
+        x: torch.Tensor | None,
         psi: torch.Tensor,
         alpha: torch.Tensor,
-        beta: torch.Tensor,
-        log_lambda0: BaseFun,
-        g: LinkFun,
+        beta: torch.Tensor | None,
+        log_lambda0: BaseHazardFn,
+        g: LinkFn,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Computes both log and cumulative hazard.
 
         Args:
             t0 (torch.Tensor): Start time.
             t1 (torch.Tensor): End time.
-            x (torch.Tensor): Covariates.
+            x (torch.Tensor | None): Covariates.
             psi (torch.Tensor): Inidivual parameters.
             alpha (torch.Tensor): Link linear parameters.
             beta (torch.Tensor): Covariate linear parameters.
-            log_lambda0 (BaseFun): Base hazard function.
-            g (LinkFun): Link function.
+            log_lambda0 (BaseHazardFn): Base hazard function.
+            g (LinkFn): Link function.
 
         Raises:
             RuntimeError: If the computation fails.
@@ -180,12 +184,12 @@ class HazardMixin:
         self,
         t_left: torch.Tensor,
         t_right: torch.Tensor,
-        x: torch.Tensor,
+        x: torch.Tensor | None,
         psi: torch.Tensor,
         alpha: torch.Tensor,
-        beta: torch.Tensor,
-        log_lambda0: BaseFun,
-        g: LinkFun,
+        beta: torch.Tensor | None,
+        log_lambda0: BaseHazardFn,
+        g: LinkFn,
         *,
         c: torch.Tensor | None = None,
         n_bissect: int,
@@ -195,12 +199,12 @@ class HazardMixin:
         Args:
             t_left (torch.Tensor): Left sampling time.
             t_right (torch.Tensor): Right censoring sampling time.
-            x (torch.Tensor): Covariates.
+            x (torch.Tensor | None): Covariates.
             psi (torch.Tensor): Inidivual parameters.
             alpha (torch.Tensor): Link linear parameters.
             beta (torch.Tensor): Covariate linear parameters.
-            log_lambda0 (BaseFun): Base hazard function.
-            g (LinkFun): Link function.
+            log_lambda0 (BaseHazardFn): Base hazard function.
+            g (LinkFn): Link function.
             n_bissect (int): _description_
             c (torch.Tensor | None, optional): _description_. Defaults to None.
 
@@ -208,7 +212,7 @@ class HazardMixin:
             torch.Tensor: The computed pre transition times.
         """
 
-        n = x.shape[0]
+        n = psi.shape[0]
 
         # Initialize for bisection search
         t0 = t_left.clone().view(-1, 1)

@@ -1,3 +1,4 @@
+import itertools
 from math import isqrt
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -6,12 +7,16 @@ from typing import Any, Callable, DefaultDict, TypeAlias, cast
 import torch
 
 
-# Aliases
-RegFun: TypeAlias = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
-LinkFun: TypeAlias = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
-EffFun: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
-BaseFun: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
-Traj: TypeAlias = list[tuple[float, Any]]
+# Type Aliases
+RegressionFn: TypeAlias = Callable[
+    [torch.Tensor, torch.Tensor | None, torch.Tensor], torch.Tensor
+]
+LinkFn: TypeAlias = Callable[
+    [torch.Tensor, torch.Tensor | None, torch.Tensor], torch.Tensor
+]
+IndividualEffectsFn: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+BaseHazardFn: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+Trajectory: TypeAlias = list[tuple[float, Any]]
 
 
 @dataclass
@@ -26,21 +31,17 @@ class ModelDesign:
         ValueError: If the keys of alpha_dims and surv do not match.
     """
 
-    f: EffFun
-    h: RegFun
+    f: IndividualEffectsFn
+    h: RegressionFn
     surv: dict[
         tuple[int, int],
         tuple[
-            BaseFun,
-            LinkFun,
+            BaseHazardFn,
+            LinkFn,
         ],
     ]
 
     def __post_init__(self):
-        """Runs the post init checks."""
-        self._check()
-
-    def _check(self):
         """Runs the checks themselves.
 
         Raises:
@@ -80,10 +81,10 @@ class ModelData:
         _type_: The instance.
     """
 
-    x: torch.Tensor
+    x: torch.Tensor | None
     t: torch.Tensor
     y: torch.Tensor
-    trajectories: list[Traj]
+    trajectories: list[Trajectory]
     c: torch.Tensor
     valid_t_: torch.Tensor = field(init=False, repr=False)
     valid_y_: torch.Tensor = field(init=False, repr=False)
@@ -97,7 +98,9 @@ class ModelData:
         """Runs the post init conversions and checks."""
 
         # Convert to float32
-        self.x = torch.as_tensor(self.x, dtype=torch.float32)
+        self.x = (
+            torch.as_tensor(self.x, dtype=torch.float32) if self.x is not None else None
+        )
         self.t = torch.as_tensor(self.t, dtype=torch.float32)
         self.y = torch.as_tensor(self.y, dtype=torch.float32)
         self.c = torch.as_tensor(self.c, dtype=torch.float32)
@@ -110,7 +113,7 @@ class ModelData:
         Raises:
             ValueError: If any tensor contains inf values.
             ValueError: If c is not 1D.
-            ValueError: If x is not 2D.
+            ValueError: If x is not 2D or None.
             ValueError: If y is not 3D.
             ValueError: If the number of individuals is inconsistent.
             ValueError: If the shape of t is not broadcastable with y.
@@ -125,21 +128,22 @@ class ModelData:
             ("y", self.y),
             ("t", self.t),
         ]:
-            if tensor.isinf().any():
+            if tensor is not None and tensor.isinf().any():
                 raise ValueError(f"{name} cannot contain inf values")
 
         # Check dimensions
         if self.c.ndim != 1:
             raise ValueError(f"c must be 1D, got {self.c.ndim}D")
-        if self.x.ndim != 2:
-            raise ValueError(f"x must be 2D, got {self.x.ndim}D")
+        if self.x is not None and self.x.ndim != 2:
+            raise ValueError(f"x must be None or 2D, got {self.x.ndim}D")
         if self.y.ndim != 3:
             raise ValueError(f"y must be 3D, got {self.y.ndim}D")
 
         # Check consistent size
         n = self.size
         if not (
-            self.y.shape[0] == n and len(self.trajectories) == n and self.c.numel() == n
+            (self.x is None or self.x.shape[0] == n)
+            and self.y.shape[0] == self.c.numel() == n
         ):
             raise ValueError("Inconsistent number of individuals")
 
@@ -155,10 +159,11 @@ class ModelData:
             raise ValueError("t cannot be NaN where y is valid")
 
         # Check trajectory sorting
-        for trajectory in self.trajectories:
-            times = [t for t, _ in trajectory]
-            if times != sorted(times):
-                raise ValueError("Trajectories must be sorted by time")
+        if any(
+            any(t1 > t2 for t1, t2 in itertools.pairwise(t for t, _ in trajectory))
+            for trajectory in self.trajectories
+        ):
+            raise ValueError("Trajectories must be sorted by time")
 
     @property
     def size(self) -> int:
@@ -167,7 +172,7 @@ class ModelData:
         Returns:
             int: The number of individuals.
         """
-        return self.x.shape[0]
+        return len(self.trajectories)
 
 
 @dataclass
@@ -186,8 +191,8 @@ class SampleData:
         _type_: The instance.
     """
 
-    x: torch.Tensor
-    trajectories: list[Traj]
+    x: torch.Tensor | None
+    trajectories: list[Trajectory]
     psi: torch.Tensor
     c: torch.Tensor | None = None
 
@@ -195,7 +200,9 @@ class SampleData:
         """Runs the post init conversions and checks."""
 
         # Convert to float32
-        self.x = torch.as_tensor(self.x, dtype=torch.float32)
+        self.x = (
+            torch.as_tensor(self.x, dtype=torch.float32) if self.x is not None else None
+        )
         self.c = (
             torch.as_tensor(self.c, dtype=torch.float32) if self.c is not None else None
         )
@@ -223,25 +230,26 @@ class SampleData:
         # Check dimensions
         if self.c is not None and self.c.ndim != 1:
             raise ValueError(f"c must be 1D, got {self.c.ndim}D")
-        if self.x.ndim != 2:
-            raise ValueError(f"x must be 2D, got {self.x.ndim}D")
+        if self.x is not None and self.x.ndim != 2:
+            raise ValueError(f"x must be None or 2D, got {self.x.ndim}D")
         if self.psi.ndim != 2:
             raise ValueError(f"psi must be 2D, got {self.psi.ndim}D")
 
         # Check consistent size
         n = self.size
         if not (
-            self.psi.shape[0] == n
-            and len(self.trajectories) == n
+            (self.x is None or self.x.shape[0] == n)
+            and self.psi.shape[0] == n
             and (self.c is None or self.c.numel() == n)
         ):
             raise ValueError("Inconsistent number of individuals")
 
         # Check trajectory sorting
-        for trajectory in self.trajectories:
-            times = [t for t, _ in trajectory]
-            if times != sorted(times):
-                raise ValueError("Trajectories must be sorted by time")
+        if any(
+            any(t1 > t2 for t1, t2 in itertools.pairwise(t for t, _ in trajectory))
+            for trajectory in self.trajectories
+        ):
+            raise ValueError("Trajectories must be sorted by time")
 
     @property
     def size(self) -> int:
@@ -250,7 +258,7 @@ class SampleData:
         Returns:
             int: The number of individuals.
         """
-        return self.x.shape[0]
+        return len(self.trajectories)
 
 
 @dataclass
@@ -278,7 +286,7 @@ class ModelParams:
     Q_repr: tuple[torch.Tensor, str]
     R_repr: tuple[torch.Tensor, str]
     alphas: dict[tuple[int, int], torch.Tensor]
-    betas: dict[tuple[int, int], torch.Tensor]
+    betas: dict[tuple[int, int], torch.Tensor] | None
     Q_dim_: int = field(init=False, repr=False)
     R_dim_: int = field(init=False, repr=False)
 
@@ -299,11 +307,12 @@ class ModelParams:
         # Convert the rest to float32
         self.gamma = torch.as_tensor(self.gamma, dtype=torch.float32)
 
-        for alpha in self.alphas.values():
-            alpha = torch.as_tensor(alpha, dtype=torch.float32)
+        for key, alpha in self.alphas.items():
+            self.alphas[key] = torch.as_tensor(alpha, dtype=torch.float32)
 
-        for beta in self.betas.values():
-            beta = torch.as_tensor(beta, dtype=torch.float32)
+        if self.betas is not None:
+            for key, beta in self.betas.items():
+                self.betas[key] = torch.as_tensor(beta, dtype=torch.float32)
 
         self._check()
         self._set_dims("Q")
@@ -339,11 +348,12 @@ class ModelParams:
             if alpha.ndim != 1:
                 raise ValueError(f"alpha {key} must be 1D")
 
-        for key, beta in self.betas.items():
-            if beta.isinf().any():
-                raise ValueError(f"beta {key} contains inf")
-            if beta.ndim != 1:
-                raise ValueError(f"beta {key} must be 1D")
+        if self.betas is not None:
+            for key, beta in self.betas.items():
+                if beta.isinf().any():
+                    raise ValueError(f"beta {key} contains inf")
+                if beta.ndim != 1:
+                    raise ValueError(f"beta {key} must be 1D")
 
     def _set_dims(self, matrix: str) -> None:
         """Sets dimensions for matrix.
@@ -388,18 +398,15 @@ class ModelParams:
             list[torch.Tensor]: The list of the parameters.
         """
 
-        params_list: list[torch.Tensor] = []
+        iterables = [
+            [self.gamma, self.Q_repr[0], self.R_repr[0]],
+            self.alphas.values(),
+        ]
 
-        # Add non-dictionary parameters
-        params_list.append(self.gamma)
-        params_list.append(self.Q_repr[0])
-        params_list.append(self.R_repr[0])
+        if self.betas is not None:
+            iterables.append(self.betas.values())
 
-        # Add dictionary parameters
-        params_list.extend(self.alphas.values())
-        params_list.extend(self.betas.values())
-
-        return params_list
+        return list(itertools.chain.from_iterable(iterables))
 
     @property
     def numel(self) -> int:
@@ -409,7 +416,7 @@ class ModelParams:
             int: The number of the parameters.
         """
 
-        return sum([p.numel() for p in self.as_list])
+        return sum(p.numel() for p in self.as_list)
 
     def get_precision(self, matrix: str) -> torch.Tensor:
         """Get precision matrix.
@@ -480,8 +487,9 @@ class ModelParams:
         for tensor in self.alphas.values():
             tensor.requires_grad_(req)
 
-        for tensor in self.betas.values():
-            tensor.requires_grad_(req)
+        if self.betas is not None:
+            for tensor in self.betas.values():
+                tensor.requires_grad_(req)
 
 
 def tril_from_flat(flat: torch.Tensor, n: int) -> torch.Tensor:
@@ -622,12 +630,12 @@ def log_cholesky_from_flat(
 
 
 def build_buckets(
-    trajectories: list[Traj],
+    trajectories: list[Trajectory],
 ) -> dict[tuple[int, int], tuple[torch.Tensor, ...]]:
     """Builds buckets from trajectories for user convenience.
 
     Args:
-        trajectories (list[Traj]): The list of individual trajectories.
+        trajectories (list[Trajectory]): The list of individual trajectories.
 
     Raises:
         RuntimeError: If the construction of the buckets fails.

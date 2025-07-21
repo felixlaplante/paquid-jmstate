@@ -81,13 +81,15 @@ class MultiStateJointModel(HazardMixin):
         ll = torch.zeros(data.size)
 
         for key, bucket in data.buckets_.items():
-            alpha, beta = self.params_.alphas[key], self.params_.betas[key]
+            alpha, beta = self.params_.alphas[key], (
+                self.params_.betas[key] if self.params_.betas is not None else None
+            )
             idx, t0, t1, obs = bucket
 
             obs_ll, alts_ll = self._log_and_cum_hazard(
                 t0,
                 t1,
-                data.x[idx],
+                data.x[idx] if data.x is not None else None,
                 psi[idx],
                 alpha,
                 beta,
@@ -209,12 +211,12 @@ class MultiStateJointModel(HazardMixin):
         return total_ll
 
     def _build_vec_rep(
-        self, trajectories: list[Traj], c: torch.Tensor
+        self, trajectories: list[Trajectory], c: torch.Tensor
     ) -> dict[tuple[int, int], tuple[torch.Tensor, ...]]:
         """Build vectorizable bucket representation.
 
         Args:
-            trajectories (list[Traj]): The trajectories.
+            trajectories (list[Trajectory]): The trajectories.
             c (torch.Tensor): Censoring times.
 
         Raises:
@@ -281,7 +283,17 @@ class MultiStateJointModel(HazardMixin):
 
         Args:
             data (ModelData): The current dataset.
+        Raises:
+            TypeError: If self.params_.betas is None and x is not None or the other way around.
         """
+
+        # Check self.params_.betas and data.x types TypeError: If self.params_.betas is None and x is not None or the other way around.
+        if (self.params_.betas is None and data.x is not None) or (
+            self.params_.betas is not None and data.x is None
+        ):
+            raise TypeError(
+                "self.params_.betas and data.x should be either both None, or neither"
+            )
 
         # Add derived quantities
         data.valid_mask_ = ~torch.isnan(data.y)
@@ -355,7 +367,7 @@ class MultiStateJointModel(HazardMixin):
         """
 
         # Load and complete data
-        x_rep = data.x.repeat(batch_size, 1)
+        x_rep = data.x.repeat(batch_size, 1) if data.x is not None else None
         t_rep = data.t if data.t.ndim == 1 else data.t.repeat(batch_size, 1)
         y_rep = data.y.repeat(batch_size, 1, 1)
         trajectories_rep = data.trajectories * batch_size
@@ -431,6 +443,8 @@ class MultiStateJointModel(HazardMixin):
             warnings.warn(
                 "Model should be fit before computing Fisher Information Matrix"
             )
+
+        self._prepare_data(data)
 
         # Set up MCMC for prediction
         sampler = self._setup_mcmc(data, step_size, adapt_rate, accept_target)
@@ -525,7 +539,11 @@ class MultiStateJointModel(HazardMixin):
 
         alphas = {key: _next(val) for key, val in self.params_.alphas.items()}
 
-        betas = {key: _next(val) for key, val in self.params_.betas.items()}
+        betas = (
+            {key: _next(val) for key, val in self.params_.betas.items()}
+            if self.params_.betas is not None
+            else None
+        )
 
         se_params = ModelParams(
             gamma, (Q_flat, Q_method), (R_flat, R_method), alphas, betas
@@ -567,14 +585,16 @@ class MultiStateJointModel(HazardMixin):
 
         for key, bucket in buckets.items():
             for k in range(u.shape[1]):
-                alpha, beta = self.params_.alphas[key], self.params_.betas[key]
+                alpha, beta = self.params_.alphas[key], (
+                    self.params_.betas[key] if self.params_.betas is not None else None
+                )
                 idx, t0, _, _ = bucket
                 t1 = u[:, k]
 
                 alts_ll = self._cum_hazard(
                     t0,
                     t1,
-                    sample_data.x[idx],
+                    sample_data.x[idx] if sample_data.x is not None else None,
                     sample_data.psi[idx],
                     alpha,
                     beta,
@@ -597,7 +617,7 @@ class MultiStateJointModel(HazardMixin):
         sample_data: SampleData,
         c_max: torch.Tensor,
         max_length: int = 100,
-    ) -> list[Traj]:
+    ) -> list[Trajectory]:
         """Sample future trajectories from the fitted joint model.
 
         Args:
@@ -611,7 +631,7 @@ class MultiStateJointModel(HazardMixin):
             RuntimeError: If the sampling fails.
 
         Returns:
-            list[Traj]: The sampled trajectories.
+            list[Trajectory]: The sampled trajectories.
         """
 
         try:
@@ -648,7 +668,11 @@ class MultiStateJointModel(HazardMixin):
                     try:
                         # Get parameters for this transition
                         alpha = self.params_.alphas[transition_key]
-                        beta = self.params_.betas[transition_key]
+                        beta = (
+                            self.params_.betas[transition_key]
+                            if self.params_.betas is not None
+                            else None
+                        )
 
                         # Extract bucket information
                         idx, t0, t1, _ = bucket_info
@@ -659,7 +683,7 @@ class MultiStateJointModel(HazardMixin):
                             torch.nextafter(
                                 t1, torch.tensor(torch.inf, dtype=torch.float32)
                             ),  # Extend upper bound
-                            sample_data.x[idx],
+                            sample_data.x[idx] if sample_data.x is not None else None,
                             sample_data.psi[idx],
                             alpha,
                             beta,
@@ -742,6 +766,7 @@ class MultiStateJointModel(HazardMixin):
             max_length (int, optional): Maximum iterations or sampling (prevents infinite loops). Defaults to 100.
 
         Raises:
+            TypeError: If self.params_.betas is None and x is not None or the other way around.
             ValueError: If u is of incorrect shape.
             RuntimeError: If the computation fails.
 
@@ -750,6 +775,14 @@ class MultiStateJointModel(HazardMixin):
         """
 
         try:
+            # Check self.params_.betas and data.x types
+            if (self.params_.betas is None and pred_data.x is not None) or (
+                self.params_.betas is not None and pred_data.x is None
+            ):
+                raise TypeError(
+                    "self.params_.betas and data.x should be either both None, or neither"
+                )
+
             # Convert and check if c_max matches the right shape
             u = torch.as_tensor(u, dtype=torch.float32)
             if u.ndim != 2 or u.shape[0] != pred_data.size:
@@ -806,7 +839,7 @@ class MultiStateJointModel(HazardMixin):
         init_warmup: int = 500,
         cont_warmup: int = 5,
         max_length: int = 100,
-    ) -> list[list[list[Traj]]]:
+    ) -> list[list[list[Trajectory]]]:
         """Predict survival trajectories for new individuals.
 
         Args:
@@ -822,13 +855,22 @@ class MultiStateJointModel(HazardMixin):
             max_length (int, optional): Maximum iterations or sampling (prevents infinite loops). Defaults to 100.
 
         Raises:
+            TypeError: If self.params_.betas is None and x is not None or the other way around.
             RuntimeError: If the prediction fails.
 
         Returns:
-            list[list[list[Traj]]]: A list of lists of trajectories. First list is for a b sample, then multiples iid drawings of the trajectories.
+            list[list[list[Trajectory]]]: A list of lists of trajectories. First list is for a b sample, then multiples iid drawings of the trajectories.
         """
 
         try:
+            # Check self.params_.betas and data.x types
+            if (self.params_.betas is None and pred_data.x is not None) or (
+                self.params_.betas is not None and pred_data.x is None
+            ):
+                raise TypeError(
+                    "self.params_.betas and data.x should be either both None, or neither"
+                )
+
             # Convert and check if c_max matches the right shape
             c_max = torch.as_tensor(c_max, dtype=torch.float32)
             if c_max.shape != (pred_data.size,):
@@ -846,13 +888,13 @@ class MultiStateJointModel(HazardMixin):
             sampler.warmup(init_warmup)
 
             # Prepare replicate data for trajectory sampling
-            x_rep = pred_data.x.repeat(n_iter_T, 1)
+            x_rep = pred_data.x.repeat(n_iter_T, 1) if pred_data.x is not None else None
             trajectories_rep = pred_data.trajectories * n_iter_T
             c_rep = pred_data.c.repeat(n_iter_T)
             c_max_rep = c_max.repeat(n_iter_T)
 
             # Generate predictions
-            predicted_trajectories: list[list[list[Traj]]] = []
+            predicted_trajectories: list[list[list[Trajectory]]] = []
 
             for _ in tqdm(range(n_iter_b), desc="Predicting trajectories"):
                 # Sample random effects
