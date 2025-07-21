@@ -25,6 +25,7 @@ class MultiStateJointModel(HazardMixin):
         model_design: ModelDesign,
         init_params: ModelParams,
         *,
+        pen: Callable[[ModelParams], torch.Tensor] | None = None,
         n_quad: int = 16,
         n_bissect: int = 16,
     ):
@@ -32,13 +33,25 @@ class MultiStateJointModel(HazardMixin):
 
         Args:
             model_design (ModelDesign): Model design containing regression, base hazard and link functions and model dimensions.
+            init_params (ModelParams): Initial values for the parameters.
+            pen (Callable[[ModelParams], torch.Tensor] | None, optional): The penalization function. Defaults to None.
             n_quad (int, optional): The used numnber of points for Gauss-Legendre quadrature. Defaults to 16.
             n_bissect (int, optional): The number of bissection steps used in transition sampling. Defaults to 16.
+
+        Raises:
+            TypeError: If pen is not None and is not callable.
         """
 
         # Store model components
         self.model_design = model_design
         self.params_ = copy.deepcopy(init_params)
+
+        # Store penalization
+        if pen is not None and not callable(pen):
+            raise TypeError("pen must be callable or None")
+        self.pen: Callable[[ModelParams], torch.Tensor] = lambda params: (
+            torch.tensor(0.0, dtype=torch.float32) if pen is None else pen(params)
+        )
 
         # Set up numerical integration
         self.n_quad = n_quad
@@ -151,7 +164,7 @@ class MultiStateJointModel(HazardMixin):
         # Compute quadratic form: b.T @ Q_inv @ b for each individual
         Q_quad_forms = torch.einsum("ik,kl,il->i", b, Q_inv, b)
 
-        # Compute log det 
+        # Compute log det
         Q_log_det = Q_eigvals.sum()
 
         # Log likelihood:
@@ -372,7 +385,7 @@ class MultiStateJointModel(HazardMixin):
 
                 # Optimization step: Update parameters
                 optimizer_instance.zero_grad()
-                nll = -current_ll.sum() / batch_size
+                nll = -current_ll.sum() / batch_size + self.pen(self.params_)
                 nll.backward()  # type: ignore
 
                 optimizer_instance.step()
