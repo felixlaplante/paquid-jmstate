@@ -486,19 +486,9 @@ class ModelParams:
             req (bool): Wether to require or not.
         """
 
-        # Enable gradients for non-dictionary parameters
-        if self.gamma is not None:
-            self.gamma.requires_grad_(req)
-        self.Q_repr[0].requires_grad_(req)
-        self.R_repr[0].requires_grad_(req)
-
-        # Enable gradients for dictionary parameters
-        for tensor in self.alphas.values():
+        # Enable or diasable gradients
+        for tensor in self.as_list:
             tensor.requires_grad_(req)
-
-        if self.betas is not None:
-            for tensor in self.betas.values():
-                tensor.requires_grad_(req)
 
 
 def _tril_from_flat(flat: torch.Tensor, n: int) -> torch.Tensor:
