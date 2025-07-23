@@ -4,22 +4,22 @@ from typing import Any, cast
 import numpy as np
 import torch
 
-from .utils import *
+from .utils import BaseHazardFn, LinkFn
 
 
 class HazardMixin:
     """Mixin class for hazard model computations."""
 
-    def _legendre_quad(self, n_quad: int = 16) -> None:
+    def _legendre_quad(self, n_quad: int) -> None:
         """Get the Legendre quadrature nodes and weights.
 
         Args:
-            n_quad (int, optional): The number of quadrature points. Defaults to 16.
+            n_quad (int, optional): The number of quadrature points.
         """
         nodes, weights = cast(
             tuple[
-                np.ndarray[Any, np.dtype[np.float64]],
-                np.ndarray[Any, np.dtype[np.float64]],
+                np.ndarray[Any, np.dtype[np.float32]],
+                np.ndarray[Any, np.dtype[np.float32]],
             ],
             np.polynomial.legendre.leggauss(n_quad),  #  type: ignore
         )
@@ -54,7 +54,7 @@ class HazardMixin:
         """
 
         # Compute baseline hazard
-        base = log_lambda0(t1, t0)
+        base = log_lambda0(t0, t1)
 
         # Compute time-varying effects
         mod = torch.einsum("ijk,k->ij", g(t1, x, psi), alpha)

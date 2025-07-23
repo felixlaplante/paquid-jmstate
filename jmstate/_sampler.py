@@ -1,5 +1,5 @@
 import warnings
-from typing import Callable
+from typing import Callable, cast
 
 import torch
 
@@ -11,18 +11,18 @@ class MetropolisHastingsSampler:
         self,
         log_prob_fn: Callable[[torch.Tensor], torch.Tensor],
         init_state: torch.Tensor,
-        init_step_size: float = 0.1,
-        adapt_rate: float = 0.1,
-        target_accept_rate: float = 0.234,
+        init_step_size: float,
+        adapt_rate: float,
+        target_accept_rate: float,
     ):
         """Initialize the Metropolis-Hastings sampler kernel.
 
         Args:
             log_prob_fn (Callable[[torch.Tensor], torch.Tensor]): Function that computes log probability.
             init_state (torch.Tensor): Starting state for the chain.
-            init_step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
-            adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.1.
-            target_accept_rate (float, optional): Mean acceptance target. Defaults to 0.234.
+            init_step_size (float, optional): Kernel standard error in Metropolis Hastings.
+            adapt_rate (float, optional): Adaptation rate for the step_size.
+            target_accept_rate (float, optional): Mean acceptance target.
 
         Raises:
             RuntimeError: If the initial log prob fails to be computed.
@@ -34,13 +34,17 @@ class MetropolisHastingsSampler:
 
         # Initialize state
         self.current_state_ = init_state.clone().detach()
-        self.step_size_ = torch.tensor(init_step_size)
 
         # Compute initial log probability
         try:
             self.current_log_prob_ = self.log_prob_fn(self.current_state_)
         except Exception as e:
             raise RuntimeError(f"Failed to compute initial log probability: {e}")
+
+        # Steps initialization
+        self.step_sizes_ = torch.full(
+            (self.current_state_.shape[0],), init_step_size, dtype=torch.float32
+        )
 
         # Statistics tracking
         self.n_samples = 0
@@ -53,22 +57,22 @@ class MetropolisHastingsSampler:
 
         Raises:
             TypeError: If the function is not callable.
-            ValueError: If step_size is not strictly positive.
-            ValueError: If target_accept_rate is not in (0, 1).
+            ValueError: If init_step_size is not strictly positive.
             ValueError: If adapt_rate is not strictly positive.
+            ValueError: If target_accept_rate is not in (0, 1).
         """
 
         if not callable(self.log_prob_fn):
             raise TypeError("log_prob_fn must be callable")
 
-        if self.step_size_ <= 0:
+        if self.step_sizes_[0] <= 0:
             raise ValueError("step_size must be strictly positive")
-
-        if not 0 < self.target_accept_rate < 1:
-            raise ValueError("target_accept_rate must be between 0 and 1")
 
         if self.adapt_rate <= 0:
             raise ValueError("adapt_rate must be strictly positive")
+
+        if not 0 < self.target_accept_rate < 1:
+            raise ValueError("target_accept_rate must be between 0 and 1")
 
     def step(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Performs a single kernel step.
@@ -81,9 +85,18 @@ class MetropolisHastingsSampler:
         self.current_state_ = self.current_state_.detach()
         self.current_log_prob_ = self.current_log_prob_.detach()
 
-        # Generate proposal
-        noise = torch.randn_like(self.current_state_)
-        proposed_state = self.current_state_ + noise * self.step_size_
+        # Generate proposal isotropic noise
+        noise = torch.randn_like(self.current_state_, dtype=torch.float32)
+
+        # Compute optimal directions
+        stds = self.current_state_.std(dim=0) + 1e-6
+        direction = stds / cast(torch.Tensor, stds.norm())  # type: ignore
+
+        # Compute the optimal noise
+        noise_stds = torch.outer(self.step_sizes_, direction)
+
+        # Get the proposal
+        proposed_state = self.current_state_ + noise * noise_stds
 
         # Compute proposal log probability
         try:
@@ -105,27 +118,16 @@ class MetropolisHastingsSampler:
         accept_mask = log_uniform < log_prob_diff
 
         # Update accepted states
-        if accept_mask.any():
-            self.current_state_ = torch.where(
-                (
-                    accept_mask.unsqueeze(-1)
-                    if accept_mask.dim() < self.current_state_.dim()
-                    else accept_mask
-                ),
-                proposed_state,
-                self.current_state_,
-            )
-            self.current_log_prob_ = torch.where(
-                accept_mask, proposed_log_prob, self.current_log_prob_
-            )
+        self.current_state_[accept_mask] = proposed_state[accept_mask]
+        self.current_log_prob_[accept_mask] = proposed_log_prob[accept_mask]
 
         # Update statistics
         self.n_samples += 1
         accepted = accept_mask.float().mean().item()
         self.n_accepted += accepted
 
-        # Adapt step size
-        self._adapt_step_size(accepted)
+        # Adapt step sizes
+        self._adapt_step_sizes(accept_mask)
 
         return self.current_state_, self.current_log_prob_
 
@@ -146,17 +148,9 @@ class MetropolisHastingsSampler:
             for _ in range(warmup):
                 self.step()
 
-    def _adapt_step_size(self, accept_rate: float):
-        """Adapt the step_size.
-
-        Args:
-            accept_rate (float): The adaptation rate.
-        """
-
-        adaptation = (
-            torch.tensor(accept_rate - self.target_accept_rate) * self.adapt_rate
-        )
-        self.step_size_ *= torch.exp(adaptation)
+    def _adapt_step_sizes(self, accept_mask: torch.Tensor):
+        adaptation = (accept_mask.float() - self.target_accept_rate) * self.adapt_rate
+        self.step_sizes_ *= torch.exp(adaptation)
 
     @property
     def acceptance_rate(self) -> float:
@@ -169,11 +163,11 @@ class MetropolisHastingsSampler:
         return self.n_accepted / max(self.n_samples, 1)
 
     @property
-    def step_size(self) -> float:
-        """Gets current step_size.
+    def mean_step_size(self) -> float:
+        """Gets the mean step size.
 
         Returns:
-            float: The current step_size.
+            float: The mean step size.
         """
 
-        return self.step_size_.item()
+        return self.step_sizes_.mean().item()

@@ -2,7 +2,7 @@ import itertools
 from math import isqrt
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Callable, DefaultDict, TypeAlias, cast
+from typing import Any, Callable, DefaultDict, TypeAlias
 
 import torch
 
@@ -17,6 +17,7 @@ LinkFn: TypeAlias = Callable[
 IndividualEffectsFn: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 BaseHazardFn: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 Trajectory: TypeAlias = list[tuple[float, Any]]
+ClockMethod: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 @dataclass
@@ -148,7 +149,7 @@ class ModelData:
             raise ValueError("Inconsistent number of individuals")
 
         # Check time compatibility
-        if self.t.shape not in [(self.y.shape[1],), self.y.shape[:2]]:
+        if self.t.shape not in ((self.y.shape[1],), self.y.shape[:2]):
             raise ValueError(f"Invalid t shape: {self.t.shape}")
 
         # Check for NaNs in t where y is valid
@@ -160,7 +161,7 @@ class ModelData:
 
         # Check trajectory sorting
         if any(
-            any(t1 > t2 for t1, t2 in itertools.pairwise(t for t, _ in trajectory))
+            any(t0 > t1 for t0, t1 in itertools.pairwise(t for t, _ in trajectory))
             for trajectory in self.trajectories
         ):
             raise ValueError("Trajectories must be sorted by time")
@@ -418,8 +419,8 @@ class ModelParams:
 
         return sum(p.numel() for p in self.as_list)
 
-    def get_precision(self, matrix: str) -> torch.Tensor:
-        """Get precision matrix.
+    def get_cholesky(self, matrix: str) -> torch.Tensor:
+        """Get Cholesky factor.
 
         Args:
             matrix (str): Either "Q" or "R".
@@ -439,14 +440,14 @@ class ModelParams:
         n = getattr(self, matrix + "_dim_")
 
         L = log_cholesky_from_flat(flat, n, method)
-        P = precision_from_log_cholesky(L)
+        L.diagonal().exp_()
 
-        return P
+        return L
 
-    def get_precision_and_log_eigvals(
+    def get_cholesky_and_log_eigvals(
         self, matrix: str
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Get precision matrix as well as log eigenvalues.
+        """Get Cholesky factor as well as log eigenvalues.
 
         Args:
             matrix (str): Either "Q" or "R".
@@ -467,9 +468,9 @@ class ModelParams:
 
         L = log_cholesky_from_flat(flat, n, method)
         eigvals = 2 * L.diagonal()
-        P = precision_from_log_cholesky(L)
+        L.diagonal().exp_()
 
-        return P, eigvals
+        return L, eigvals
 
     def require_grad(self, req: bool):
         """Enable gradient computation on all parameters.
@@ -492,7 +493,7 @@ class ModelParams:
                 tensor.requires_grad_(req)
 
 
-def tril_from_flat(flat: torch.Tensor, n: int) -> torch.Tensor:
+def _tril_from_flat(flat: torch.Tensor, n: int) -> torch.Tensor:
     """Generate the lower triangular matrix associated with flat tensor.
 
     Args:
@@ -517,7 +518,7 @@ def tril_from_flat(flat: torch.Tensor, n: int) -> torch.Tensor:
     return L
 
 
-def flat_from_tril(L: torch.Tensor) -> torch.Tensor:
+def _flat_from_tril(L: torch.Tensor) -> torch.Tensor:
     """Flatten the lower triangular part (including the diagonal) of a square matrix L
     into a 1D tensor, in row-wise order.
 
@@ -545,49 +546,6 @@ def flat_from_tril(L: torch.Tensor) -> torch.Tensor:
         raise RuntimeError(f"Failed to flatten matrix: {e}") from e
 
 
-def precision_from_log_cholesky(L: torch.Tensor) -> torch.Tensor:
-    """Computes the inverse covariance matrix from log Cholesky factor.
-
-    Args:
-        L (torch.Tensor): log Cholesky factor
-
-    Raises:
-        RuntimeError: Error if the computation fails.
-
-    Returns:
-        torch.Tensor: The inverse covariance (precision) matrix.
-    """
-
-    L.diagonal().exp_()
-    P = L @ L.T
-
-    return P
-
-
-def log_cholesky_from_precision(P: torch.Tensor) -> torch.Tensor:
-    """Computes the log Cholesky-like factor used in precision_from_log_cholesky.
-    (with log-diagonal convention) from the inverse covariance matrix.
-
-    Args:
-        P (torch.Tensor): Precision matrix (positive definite).
-
-    Raises:
-        RuntimeError: Error if the computation fails.
-
-    Returns:
-        torch.Tensor: Lower-triangular matrix L such that L.diagonal().exp() @ L.diagonal().exp().T = P
-    """
-
-    try:
-        L: torch.Tensor = cast(torch.Tensor, torch.linalg.cholesky(P))  # type: ignore
-        L.diagonal().log_()
-
-        return L
-
-    except Exception as e:
-        raise RuntimeError(f"Failed to invert precision matrix: {e}") from e
-
-
 def log_cholesky_from_flat(
     flat: torch.Tensor, n: int, method: str = "full"
 ) -> torch.Tensor:
@@ -602,9 +560,10 @@ def log_cholesky_from_flat(
         ValueError: If the array is not flat.
         ValueError: If the number of parameters is inconsistent with n.
         ValueError: If the number of parameters does not equal one.
+        ValueError: If the method is not in ("full", "diag", "ball").
 
     Returns:
-        torch.Tensor: _description_
+        torch.Tensor: The log cholesky representation.
     """
 
     if flat.ndim != 1:
@@ -612,7 +571,7 @@ def log_cholesky_from_flat(
 
     match method:
         case "full":
-            return tril_from_flat(flat, n)
+            return _tril_from_flat(flat, n)
         case "diag":
             if flat.numel() != n:
                 raise ValueError(
@@ -626,7 +585,33 @@ def log_cholesky_from_flat(
         case _:
             raise ValueError(f"Got method {method} unknown")
 
-    return P
+
+def flat_from_log_cholesky(L: torch.Tensor, method: str = "full") -> torch.Tensor:
+    """Computes flat tensor from log cholesky matrix according to choice of method.
+
+    Args:
+        flat (torch.Tensor): The flat tensor parameter.
+        method (str, optional): The method, either for full, diagonal or isotropic covariance matrix. Defaults to "full".
+
+    Raises:
+        ValueError: If the method is not in ("full", "diag", "ball").
+
+    Returns:
+        torch.Tensor: The flat representation.
+    """
+
+    if L.ndim != 2 or L.shape[0] != L.shape[1]:
+        raise ValueError(f"L must be square, got shape {L.shape}")
+
+    match method:
+        case "full":
+            return _flat_from_tril(L)
+        case "diag":
+            return L.diagonal()
+        case "ball":
+            return L[0, 0]
+        case _:
+            raise ValueError(f"Got method {method} unknown")
 
 
 def build_buckets(
