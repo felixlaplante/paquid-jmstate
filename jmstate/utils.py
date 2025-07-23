@@ -14,7 +14,9 @@ RegressionFn: TypeAlias = Callable[
 LinkFn: TypeAlias = Callable[
     [torch.Tensor, torch.Tensor | None, torch.Tensor], torch.Tensor
 ]
-IndividualEffectsFn: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+IndividualEffectsFn: TypeAlias = Callable[
+    [torch.Tensor | None, torch.Tensor], torch.Tensor
+]
 BaseHazardFn: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 Trajectory: TypeAlias = list[tuple[float, Any]]
 ClockMethod: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
@@ -283,7 +285,7 @@ class ModelParams:
         _type_: The instance.
     """
 
-    gamma: torch.Tensor
+    gamma: torch.Tensor | None
     Q_repr: tuple[torch.Tensor, str]
     R_repr: tuple[torch.Tensor, str]
     alphas: dict[tuple[int, int], torch.Tensor]
@@ -306,7 +308,11 @@ class ModelParams:
         self.R_repr = (R_flat, R_method)
 
         # Convert the rest to float32
-        self.gamma = torch.as_tensor(self.gamma, dtype=torch.float32)
+        self.gamma = (
+            torch.as_tensor(self.gamma, dtype=torch.float32)
+            if self.gamma is not None
+            else None
+        )
 
         for key, alpha in self.alphas.items():
             self.alphas[key] = torch.as_tensor(alpha, dtype=torch.float32)
@@ -337,6 +343,8 @@ class ModelParams:
             ("Q_flat_", self.Q_repr[0]),
             ("R_flat_", self.R_repr[0]),
         ]:
+            if tensor is None:
+                continue
             if tensor.isinf().any():
                 raise ValueError(f"{name} contains inf")
             if tensor.ndim != 1:
@@ -399,13 +407,12 @@ class ModelParams:
             list[torch.Tensor]: The list of the parameters.
         """
 
-        iterables = [
-            [self.gamma, self.Q_repr[0], self.R_repr[0]],
+        iterables = (
+            [self.gamma] if self.gamma is not None else [],
+            [self.Q_repr[0], self.R_repr[0]],
             self.alphas.values(),
-        ]
-
-        if self.betas is not None:
-            iterables.append(self.betas.values())
+            self.betas.values() if self.betas is not None else [],
+        )
 
         return list(itertools.chain.from_iterable(iterables))
 
@@ -480,7 +487,8 @@ class ModelParams:
         """
 
         # Enable gradients for non-dictionary parameters
-        self.gamma.requires_grad_(req)
+        if self.gamma is not None:
+            self.gamma.requires_grad_(req)
         self.Q_repr[0].requires_grad_(req)
         self.R_repr[0].requires_grad_(req)
 
