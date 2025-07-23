@@ -78,32 +78,28 @@ class MultiStateJointModel(HazardMixin):
             torch.Tensor: The computed log likelihood.
         """
 
-        ll = torch.zeros(data.size)
+        ll = torch.zeros(data.size, dtype=torch.float32)
 
         for key, bucket in data.buckets_.items():
-            alpha, beta = self.params_.alphas[key], (
+            idx, t0, t1, obs = bucket
+
+            current_alpha = self.params_.alphas[key]
+            current_beta = (
                 self.params_.betas[key] if self.params_.betas is not None else None
             )
-            idx, t0, t1, obs = bucket
+            current_x = data.x[idx] if data.x is not None else None
+            current_psi = psi[idx]
+            current_surv = self.model_design.surv[key]
 
             obs_ll, alts_ll = self._log_and_cum_hazard(
                 t0,
                 t1,
-                data.x[idx] if data.x is not None else None,
-                psi[idx],
-                alpha,
-                beta,
-                *self.model_design.surv[key],
+                current_x,
+                current_psi,
+                current_alpha,
+                current_beta,
+                *current_surv,
             )
-
-            # Check for invalid values
-            if obs_ll.isnan().any() or obs_ll.isinf().any():
-                warnings.warn(f"Invalid observed log likelihood for bucket {key}")
-                continue
-
-            if alts_ll.isnan().any() or alts_ll.isinf().any():
-                warnings.warn(f"Invalid cumulative hazard for bucket {key}")
-                continue
 
             vals = obs * obs_ll - alts_ll
             ll.scatter_add_(0, idx, vals)
@@ -123,17 +119,17 @@ class MultiStateJointModel(HazardMixin):
 
         # Compute residuals: observed - predicted (only for valid observations)
         predicted = self.model_design.h(data.valid_t_, data.x, psi)
-        diff = data.valid_y_ - predicted * data.valid_mask_
+        diffs = data.valid_y_ - predicted * data.valid_mask_
 
         # Check for invalid predictions
         if torch.isnan(predicted).any() or torch.isinf(predicted).any():
             warnings.warn("Invalid predictions encountered in longitudinal model")
 
         # Reconstruct precision matrix R_inv from Cholesky parametrization and logdet
-        R_inv, R_log_eigvals = self.params_.get_precision_and_log_eigvals("R")
+        R_inv_cholesky, R_log_eigvals = self.params_.get_cholesky_and_log_eigvals("R")
 
-        # Compute quadratic form: diff.T @ R_inv @ diff for each individual
-        R_quad_forms = torch.einsum("ijk,kl,ijl->i", diff, R_inv, diff)
+        # Compute quadratic forms
+        R_quad_forms = (diffs @ R_inv_cholesky).pow(2).sum(dim=(1, 2))
 
         # Compute total log det for each individual
         R_log_dets = torch.einsum("ij,j->i", data.n_valid_, R_log_eigvals)
@@ -141,13 +137,9 @@ class MultiStateJointModel(HazardMixin):
         # Log likelihood
         ll = 0.5 * (R_log_dets - R_quad_forms)
 
-        # Validate output
-        if torch.isnan(ll).any() or torch.isinf(ll).any():
-            warnings.warn("Invalid longitudinal likelihood computed")
-
         return ll
 
-    def _pr_ll(self, b: torch.Tensor) -> torch.Tensor:
+    def _prior_ll(self, b: torch.Tensor) -> torch.Tensor:
         """Computes the prior log likelihood.
 
         Args:
@@ -161,20 +153,16 @@ class MultiStateJointModel(HazardMixin):
         """
 
         # Reconstruct precision matrix R_inv from Cholesky parametrization and logdet
-        Q_inv, Q_log_eigvals = self.params_.get_precision_and_log_eigvals("Q")
+        Q_inv_cholesky, Q_log_eigvals = self.params_.get_cholesky_and_log_eigvals("Q")
 
-        # Compute quadratic form: b.T @ Q_inv @ b for each individual
-        Q_quad_forms = torch.einsum("ik,kl,il->i", b, Q_inv, b)
+        # Compute quadratic form
+        Q_quad_form = (b @ Q_inv_cholesky).pow(2).sum(dim=1)
 
         # Compute log det
         Q_log_det = Q_log_eigvals.sum()
 
         # Log likelihood:
-        ll = 0.5 * (Q_log_det - Q_quad_forms)
-
-        # Validate output
-        if torch.isnan(ll).any() or torch.isinf(ll).any():
-            warnings.warn("Invalid prior likelihood computed")
+        ll = 0.5 * (Q_log_det - Q_quad_form)
 
         return ll
 
@@ -199,7 +187,7 @@ class MultiStateJointModel(HazardMixin):
         # Compute individual likelihood components
         long_ll = self._long_ll(psi, data)
         hazard_ll = self._hazard_ll(psi, data)
-        prior_ll = self._pr_ll(b)
+        prior_ll = self._prior_ll(b)
 
         # Sum all likelihood components
         total_ll = long_ll + hazard_ll + prior_ll
@@ -305,24 +293,24 @@ class MultiStateJointModel(HazardMixin):
     def _setup_mcmc(
         self,
         data: ModelData,
-        init_step_size: float = 0.1,
-        adapt_rate: float = 0.1,
-        target_accept_rate: float = 0.234,
+        init_step_size: float,
+        adapt_rate: float,
+        target_accept_rate: float,
     ) -> MetropolisHastingsSampler:
         """Setup the MCMC kernel and hyperparameters.
 
         Args:
             data (ModelData): The dataset on which the likelihood is to be computed.
-            init_step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
-            adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.1.
-            target_accept_rate (float, optional): Mean acceptance target. Defaults to 0.234.
+            init_step_size (float, optional): Kernel standard error in Metropolis Hastings.
+            adapt_rate (float, optional): Adaptation rate for the step_size.
+            target_accept_rate (float, optional): Mean acceptance target.
 
         Returns:
             MetropolisHastingsSampler: The intialized Markov kernel.
         """
 
         # Initialize random effects
-        init_b = torch.zeros((data.size, self.params_.Q_dim_))
+        init_b = torch.zeros((data.size, self.params_.Q_dim_), dtype=torch.float32)
 
         # Create sampler
         sampler = MetropolisHastingsSampler(
@@ -344,8 +332,8 @@ class MultiStateJointModel(HazardMixin):
         n_iter: int = 2000,
         batch_size: int = 5,
         callback: Callable[[], None] | None = None,
-        step_size: float = 0.1,
-        adapt_rate: float = 0.1,
+        init_step_size: float = 0.1,
+        adapt_rate: float = 0.01,
         accept_target: float = 0.234,
         init_warmup: int = 500,
         cont_warmup: int = 5,
@@ -359,8 +347,8 @@ class MultiStateJointModel(HazardMixin):
             n_iter (int, optional): Number of iterations for optimization. Defaults to 2000.
             batch_size (int, optional): Batch size used in fitting. Defaults to 5.
             callback (Callable[[], None] | None, optional): A callback function that can be used to track the optimization. Defaults to None.
-            step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
-            adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.1.
+            init_step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
+            adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.01.
             target_accept_rate (float, optional): Mean acceptation target. Defaults to 0.234.
             init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 500.
             cont_warmup (int, optional): The warmup step in-between each parameter changes. Defaults to 5.
@@ -383,7 +371,9 @@ class MultiStateJointModel(HazardMixin):
         optimizer_instance = optimizer(params=params_list, **optimizer_params)
 
         # Set up MCMC
-        self.sampler_ = self._setup_mcmc(data_rep, step_size, adapt_rate, accept_target)
+        self.sampler_ = self._setup_mcmc(
+            data_rep, init_step_size, adapt_rate, accept_target
+        )
 
         # Warmup MCMC
         self.sampler_.warmup(init_warmup)
@@ -419,7 +409,7 @@ class MultiStateJointModel(HazardMixin):
         *,
         n_iter_fim: int = 500,
         step_size: float = 0.1,
-        adapt_rate: float = 0.1,
+        adapt_rate: float = 0.01,
         accept_target: float = 0.234,
         init_warmup: int = 500,
         cont_warmup: int = 5,
@@ -430,13 +420,10 @@ class MultiStateJointModel(HazardMixin):
             data (ModelData): The dataset to learn from. Should be the same as used in fit.
             n_iter_fim (int, optional): Number of iterations to compute n_iter_fim. Defaults to 500.
             step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
-            adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.1.
+            adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.01.
             target_accept_rate (float, optional): Mean acceptation target. Defaults to 0.234.
             init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 500.
             cont_warmup (int, optional): The warmup step in-between each parameter changes. Defaults to 5.
-
-        Raises:
-            ValueError: If self.sampler_ is None.
         """
 
         if not self.fit_:
@@ -585,20 +572,26 @@ class MultiStateJointModel(HazardMixin):
 
         for key, bucket in buckets.items():
             for k in range(u.shape[1]):
-                alpha, beta = self.params_.alphas[key], (
+                idx, t0, _, _ = bucket
+
+                current_alpha = self.params_.alphas[key]
+                current_beta = (
                     self.params_.betas[key] if self.params_.betas is not None else None
                 )
-                idx, t0, _, _ = bucket
+                current_x = sample_data.x[idx] if sample_data.x is not None else None
+                current_psi = sample_data.psi[idx]
+                current_surv = self.model_design.surv[key]
+
                 t1 = u[:, k]
 
                 alts_ll = self._cum_hazard(
                     t0,
                     t1,
-                    sample_data.x[idx] if sample_data.x is not None else None,
-                    sample_data.psi[idx],
-                    alpha,
-                    beta,
-                    *self.model_design.surv[key],
+                    current_x,
+                    current_psi,
+                    current_alpha,
+                    current_beta,
+                    *current_surv,
                 )
 
                 # Check for invalid values
@@ -662,37 +655,43 @@ class MultiStateJointModel(HazardMixin):
                 )
 
                 # Sample transition times for each possible transition
-                for j, (transition_key, bucket_info) in enumerate(
-                    current_buckets.items()
-                ):
+                for j, (key, bucket) in enumerate(current_buckets.items()):
                     try:
-                        # Get parameters for this transition
-                        alpha = self.params_.alphas[transition_key]
-                        beta = (
-                            self.params_.betas[transition_key]
+                        # Extract bucket information
+                        idx, t0, t1, _ = bucket
+
+                        # Extend upper bound
+                        t1 = torch.nextafter(
+                            t1, torch.tensor(torch.inf, dtype=torch.float32)
+                        )
+
+                        current_alpha = self.params_.alphas[key]
+                        current_beta = (
+                            self.params_.betas[key]
                             if self.params_.betas is not None
                             else None
                         )
-
-                        # Extract bucket information
-                        idx, t0, t1, _ = bucket_info
+                        current_x = (
+                            sample_data.x[idx] if sample_data.x is not None else None
+                        )
+                        current_psi = sample_data.psi[idx]
+                        current_surv = self.model_design.surv[key]
+                        current_c = (
+                            sample_data.c[idx]
+                            if not iteration and sample_data.c is not None
+                            else None
+                        )
 
                         # Sample transition times
                         t_sample = self._sample_trajectory_step(
                             t0,
-                            torch.nextafter(
-                                t1, torch.tensor(torch.inf, dtype=torch.float32)
-                            ),  # Extend upper bound
-                            sample_data.x[idx] if sample_data.x is not None else None,
-                            sample_data.psi[idx],
-                            alpha,
-                            beta,
-                            *self.model_design.surv[transition_key],
-                            c=(
-                                sample_data.c[idx]
-                                if not iteration and sample_data.c is not None
-                                else None
-                            ),
+                            t1,
+                            current_x,
+                            current_psi,
+                            current_alpha,
+                            current_beta,
+                            *current_surv,
+                            c=current_c,
                             n_bissect=self.n_bissect,
                         )
 
@@ -700,9 +699,7 @@ class MultiStateJointModel(HazardMixin):
                         t_candidates[idx, j] = t_sample
 
                     except Exception as e:
-                        warnings.warn(
-                            f"Error sampling transition {transition_key}: {e}"
-                        )
+                        warnings.warn(f"Error sampling transition {key}: {e}")
                         continue
 
                 # Find earliest transition
@@ -747,7 +744,7 @@ class MultiStateJointModel(HazardMixin):
         *,
         n_iter_b: int,
         step_size: float = 0.1,
-        adapt_rate: float = 0.1,
+        adapt_rate: float = 0.01,
         accept_target: float = 0.234,
         init_warmup: int = 500,
         cont_warmup: int = 5,
@@ -759,7 +756,7 @@ class MultiStateJointModel(HazardMixin):
             u (torch.Tensor): The evaluation times of the probabilities.
             n_iter_b (int): Number of iterations for random effects sampling.
             step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
-            adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.1.
+            adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.01.
             accept_target (float, optional): Mean acceptation target. Defaults to 0.234.
             init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 500.
             cont_warmup (int, optional): The warmup step in-between each parameter changes. Defaults to 5.
@@ -834,7 +831,7 @@ class MultiStateJointModel(HazardMixin):
         n_iter_b: int,
         n_iter_T: int,
         step_size: float = 0.1,
-        adapt_rate: float = 0.1,
+        adapt_rate: float = 0.01,
         accept_target: float = 0.234,
         init_warmup: int = 500,
         cont_warmup: int = 5,
@@ -848,7 +845,7 @@ class MultiStateJointModel(HazardMixin):
             n_iter_b (int): Number of iterations for random effects sampling.
             n_iter_T (int): Number of trajectory samples per random effects sample.
             step_size (float, optional): Kernel standard error in Metropolis Hastings. Defaults to 0.1.
-            adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.1.
+            adapt_rate (float, optional): Adaptation rate for the step_size. Defaults to 0.01.
             accept_target (float, optional): Mean acceptation target. Defaults to 0.234.
             init_warmup (int, optional): The number of iteration steps used in the warmup. Defaults to 500.
             cont_warmup (int, optional): The warmup step in-between each parameter changes. Defaults to 5.
