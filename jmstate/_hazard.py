@@ -1,4 +1,3 @@
-import warnings
 from typing import Any, cast
 
 import numpy as np
@@ -25,6 +24,9 @@ class HazardMixin:
         )
         self._std_nodes = torch.tensor(nodes, dtype=torch.float32)
         self._std_weights = torch.tensor(weights, dtype=torch.float32)
+        self._one_and_std_nodes = torch.cat(
+            [torch.ones(1, dtype=torch.float32), self._std_nodes]
+        )
 
     def _log_hazard(
         self,
@@ -68,10 +70,6 @@ class HazardMixin:
 
         # Compute the total
         log_hazard_vals = base + mod + cov
-
-        # Check for numerical issues
-        if torch.isnan(log_hazard_vals).any() or torch.isinf(log_hazard_vals).any():
-            warnings.warn("Numerical issues in log hazard computation")
 
         return log_hazard_vals
 
@@ -118,10 +116,6 @@ class HazardMixin:
         # Numerical integration using Gaussian quadrature
         hazard_vals = torch.exp(torch.clamp(log_hazard_vals, min=-50.0, max=50.0))
 
-        # Check for numerical issues
-        if torch.isnan(hazard_vals).any() or torch.isinf(hazard_vals).any():
-            warnings.warn("Numerical issues in hazard computation")
-
         cum_hazard_vals = half.flatten() * (hazard_vals * self._std_weights).sum(dim=1)
 
         return cum_hazard_vals
@@ -164,7 +158,7 @@ class HazardMixin:
         half = 0.5 * (t1 - t0)
 
         # Combine endpoint and quadrature points
-        ts = torch.cat([t1, mid + half * self._std_nodes], dim=1)
+        ts = mid + half * self._one_and_std_nodes
 
         # Compute log hazard at all points
         temp = self._log_hazard(t0, ts, x, psi, alpha, beta, log_lambda0, g)

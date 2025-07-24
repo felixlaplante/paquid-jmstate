@@ -2,7 +2,7 @@ import itertools
 from math import isqrt
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Callable, DefaultDict, TypeAlias
+from typing import Any, Iterable, Callable, DefaultDict, TypeAlias
 
 import torch
 
@@ -407,11 +407,11 @@ class ModelParams:
             list[torch.Tensor]: The list of the parameters.
         """
 
-        iterables = (
+        iterables: Iterable[torch.Tensor | list[torch.Tensor]] = (
             [self.gamma] if self.gamma is not None else [],
             [self.Q_repr[0], self.R_repr[0]],
-            self.alphas.values(),
-            self.betas.values() if self.betas is not None else [],
+            list(self.alphas.values()),
+            list(self.betas.values()) if self.betas is not None else [],
         )
 
         return list(itertools.chain.from_iterable(iterables))

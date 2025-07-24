@@ -87,8 +87,8 @@ class MultiStateJointModel(HazardMixin):
             current_beta = (
                 self.params_.betas[key] if self.params_.betas is not None else None
             )
-            current_x = data.x[idx] if data.x is not None else None
-            current_psi = psi[idx]
+            current_x = data.x.index_select(0, idx) if data.x is not None else None
+            current_psi = psi.index_select(0, idx)
             current_surv = self.model_design.surv[key]
 
             obs_ll, alts_ll = self._log_and_cum_hazard(
@@ -102,7 +102,7 @@ class MultiStateJointModel(HazardMixin):
             )
 
             vals = obs * obs_ll - alts_ll
-            ll.scatter_add_(0, idx, vals)
+            ll.index_add_(0, idx, vals)
 
         return ll
 
@@ -120,10 +120,6 @@ class MultiStateJointModel(HazardMixin):
         # Compute residuals: observed - predicted (only for valid observations)
         predicted = self.model_design.h(data.valid_t_, data.x, psi)
         diffs = data.valid_y_ - predicted * data.valid_mask_
-
-        # Check for invalid predictions
-        if torch.isnan(predicted).any() or torch.isinf(predicted).any():
-            warnings.warn("Invalid predictions encountered in longitudinal model")
 
         # Reconstruct precision matrix R_inv from Cholesky parametrization and logdet
         R_inv_cholesky, R_log_eigvals = self.params_.get_cholesky_and_log_eigvals("R")
@@ -180,10 +176,6 @@ class MultiStateJointModel(HazardMixin):
         # Transform random effects to individual-specific parameters
         psi = self.model_design.f(self.params_.gamma, b)
 
-        # Validate transformation
-        if torch.isnan(psi).any() or torch.isinf(psi).any():
-            warnings.warn("Invalid psi values from transformation")
-
         # Compute individual likelihood components
         long_ll = self._long_ll(psi, data)
         hazard_ll = self._hazard_ll(psi, data)
@@ -191,10 +183,6 @@ class MultiStateJointModel(HazardMixin):
 
         # Sum all likelihood components
         total_ll = long_ll + hazard_ll + prior_ll
-
-        # Final validation
-        if torch.isnan(total_ll).any() or torch.isinf(total_ll).any():
-            warnings.warn("Invalid total likelihood computed")
 
         return total_ll
 
@@ -400,6 +388,10 @@ class MultiStateJointModel(HazardMixin):
                 warnings.warn(f"Error in iteration {iteration}: {e}")
                 continue
 
+        params_flat = torch.cat([p.detach().flatten() for p in params_list])
+        if torch.isnan(params_flat).any() or torch.isinf(params_flat).any():
+            warnings.warn("Error infering model parameters")
+
         # Set fit_ to True
         self.fit_ = True
 
@@ -512,11 +504,11 @@ class MultiStateJointModel(HazardMixin):
         def _next(ref: torch.Tensor) -> torch.Tensor:
             nonlocal i
             n = ref.numel()
-            result = flat_se[i : i + n].view(ref.shape)
+            result = flat_se[i : i + n]
             i += n
             return result
 
-        gamma = _next(self.params_.gamma)
+        gamma = _next(self.params_.gamma) if self.params_.gamma is not None else None
 
         Q_flat = _next(self.params_.Q_repr[0])
         Q_method = self.params_.Q_repr[1]
@@ -578,8 +570,12 @@ class MultiStateJointModel(HazardMixin):
                 current_beta = (
                     self.params_.betas[key] if self.params_.betas is not None else None
                 )
-                current_x = sample_data.x[idx] if sample_data.x is not None else None
-                current_psi = sample_data.psi[idx]
+                current_x = (
+                    sample_data.x.index_select(0, idx)
+                    if sample_data.x is not None
+                    else None
+                )
+                current_psi = sample_data.psi.index_select(0, idx)
                 current_surv = self.model_design.surv[key]
 
                 t1 = u[:, k]
@@ -594,12 +590,7 @@ class MultiStateJointModel(HazardMixin):
                     *current_surv,
                 )
 
-                # Check for invalid values
-                if alts_ll.isnan().any() or alts_ll.isinf().any():
-                    warnings.warn(f"Invalid cumulative hazard for bucket {key}")
-                    continue
-
-                nlog_probs[:, k].scatter_add_(0, idx, alts_ll)
+                nlog_probs[:, k].index_add_(0, idx, alts_ll)
 
         log_probs = -nlog_probs
 
@@ -672,12 +663,14 @@ class MultiStateJointModel(HazardMixin):
                             else None
                         )
                         current_x = (
-                            sample_data.x[idx] if sample_data.x is not None else None
+                            sample_data.x.index_select(0, idx)
+                            if sample_data.x is not None
+                            else None
                         )
-                        current_psi = sample_data.psi[idx]
+                        current_psi = sample_data.psi.index_select(0, idx)
                         current_surv = self.model_design.surv[key]
                         current_c = (
-                            sample_data.c[idx]
+                            sample_data.c.index_select(0, idx)
                             if not iteration and sample_data.c is not None
                             else None
                         )

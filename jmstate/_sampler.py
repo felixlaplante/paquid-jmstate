@@ -107,11 +107,6 @@ class MetropolisHastingsSampler:
             warnings.warn(f"Failed to compute proposal log probability: {e}")
             return self.current_state, self.current_log_prob
 
-        # Check for invalid log probabilities
-        if torch.isnan(proposed_log_prob).any() or torch.isinf(proposed_log_prob).any():
-            warnings.warn("Invalid log probability encountered in proposal")
-            return self.current_state, self.current_log_prob
-
         # Compute acceptance probability
         log_prob_diff = proposed_log_prob - self.current_log_prob
 
