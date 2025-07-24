@@ -123,8 +123,7 @@ class MetropolisHastingsSampler:
 
         # Update statistics
         self.n_samples += 1
-        accepted = accept_mask.float().mean().item()
-        self.n_accepted += accepted
+        self.n_accepted += accept_mask.float()
 
         # Adapt step sizes
         self._adapt_step_sizes(accept_mask)
@@ -153,14 +152,16 @@ class MetropolisHastingsSampler:
         self.step_sizes_ *= torch.exp(adaptation)
 
     @property
-    def acceptance_rate(self) -> float:
+    def acceptance_rates(self) -> torch.Tensor:
         """Gets the acceptance_rate mean.
 
         Returns:
-            float: The mean of the acceptance_rate accross iterations.
+            torch.Tensor: The means of the acceptance_rates accross iterations.
         """
 
-        return self.n_accepted / max(self.n_samples, 1)
+        return self.n_accepted / cast(
+            torch.Tensor, torch.clamp(self.n_samples, min=1.0)  # type: ignore
+        )
 
     @property
     def mean_step_size(self) -> float:
