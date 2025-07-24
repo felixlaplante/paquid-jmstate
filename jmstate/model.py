@@ -314,11 +314,11 @@ class MultiStateJointModel(HazardMixin):
 
         # Create sampler
         sampler = MetropolisHastingsSampler(
-            log_prob_fn=lambda b: self._ll(b, data),
-            init_state=init_b,
-            init_step_size=init_step_size,
-            adapt_rate=adapt_rate,
-            target_accept_rate=target_accept_rate,
+            lambda b: self._ll(b, data),
+            init_b,
+            init_step_size,
+            adapt_rate,
+            target_accept_rate,
         )
 
         return sampler
