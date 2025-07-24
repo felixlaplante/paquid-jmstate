@@ -57,7 +57,7 @@ class HazardMixin:
         base = log_lambda0(t0, t1)
 
         # Compute time-varying effects
-        mod = torch.einsum("ijk,k->ij", g(t1, x, psi), alpha)
+        mod = g(t1, x, psi) @ alpha
 
         # Compute covariates effect
         cov = (
