@@ -33,23 +33,23 @@ class MetropolisHastingsSampler:
         self.target_accept_rate = target_accept_rate
 
         # Initialize state
-        self.current_state_ = init_state.clone().detach()
+        self.current_state = init_state.clone().detach()
 
         # Compute initial log probability
         try:
-            self.current_log_prob_ = self.log_prob_fn(self.current_state_)
+            self.current_log_prob = self.log_prob_fn(self.current_state)
         except Exception as e:
             raise RuntimeError(f"Failed to compute initial log probability: {e}")
 
         # Steps initialization
-        self.step_sizes_ = torch.full(
-            (self.current_state_.shape[0],), init_step_size, dtype=torch.float32
+        self.step_sizes = torch.full(
+            (self.current_state.shape[0],), init_step_size, dtype=torch.float32
         )
 
         # Statistics tracking
         self.n_samples = torch.tensor(0.0, dtype=torch.float32)
         self.n_accepted = torch.zeros(
-            (self.current_state_.shape[0],), dtype=torch.float32
+            (self.current_state.shape[0],), dtype=torch.float32
         )
 
         self._check()
@@ -67,7 +67,7 @@ class MetropolisHastingsSampler:
         if not callable(self.log_prob_fn):
             raise TypeError("log_prob_fn must be callable")
 
-        if self.step_sizes_[0] <= 0:
+        if self.step_sizes[0] <= 0:
             raise ValueError("step_size must be strictly positive")
 
         if self.adapt_rate <= 0:
@@ -84,44 +84,44 @@ class MetropolisHastingsSampler:
         """
 
         # Detach current state to avoid gradient accumulation
-        self.current_state_ = self.current_state_.detach()
-        self.current_log_prob_ = self.current_log_prob_.detach()
+        self.current_state = self.current_state.detach()
+        self.current_log_prob = self.current_log_prob.detach()
 
         # Generate proposal isotropic noise
-        noise = torch.randn_like(self.current_state_, dtype=torch.float32)
+        noise = torch.randn_like(self.current_state, dtype=torch.float32)
 
         # Compute optimal directions
-        stds = self.current_state_.std(dim=0) + 1e-6
+        stds = self.current_state.std(dim=0) + 1e-6
         direction = stds / cast(torch.Tensor, stds.norm())  # type: ignore
 
         # Compute the optimal noise
-        noise_stds = torch.outer(self.step_sizes_, direction)
+        noise_stds = torch.outer(self.step_sizes, direction)
 
         # Get the proposal
-        proposed_state = self.current_state_ + noise * noise_stds
+        proposed_state = self.current_state + noise * noise_stds
 
         # Compute proposal log probability
         try:
             proposed_log_prob = self.log_prob_fn(proposed_state)
         except Exception as e:
             warnings.warn(f"Failed to compute proposal log probability: {e}")
-            return self.current_state_, self.current_log_prob_
+            return self.current_state, self.current_log_prob
 
         # Check for invalid log probabilities
         if torch.isnan(proposed_log_prob).any() or torch.isinf(proposed_log_prob).any():
             warnings.warn("Invalid log probability encountered in proposal")
-            return self.current_state_, self.current_log_prob_
+            return self.current_state, self.current_log_prob
 
         # Compute acceptance probability
-        log_prob_diff = proposed_log_prob - self.current_log_prob_
+        log_prob_diff = proposed_log_prob - self.current_log_prob
 
         # Vectorized acceptance decision
         log_uniform = torch.log(torch.clamp(torch.rand_like(log_prob_diff), min=1e-8))
         accept_mask = log_uniform < log_prob_diff
 
         # Update accepted states
-        self.current_state_[accept_mask] = proposed_state[accept_mask]
-        self.current_log_prob_[accept_mask] = proposed_log_prob[accept_mask]
+        self.current_state[accept_mask] = proposed_state[accept_mask]
+        self.current_log_prob[accept_mask] = proposed_log_prob[accept_mask]
 
         # Update statistics
         self.n_samples += 1
@@ -130,7 +130,7 @@ class MetropolisHastingsSampler:
         # Adapt step sizes
         self._adapt_step_sizes(accept_mask)
 
-        return self.current_state_, self.current_log_prob_
+        return self.current_state, self.current_log_prob
 
     def warmup(self, warmup: int) -> None:
         """Warmups the MCMC.
@@ -151,7 +151,7 @@ class MetropolisHastingsSampler:
 
     def _adapt_step_sizes(self, accept_mask: torch.Tensor):
         adaptation = (accept_mask.float() - self.target_accept_rate) * self.adapt_rate
-        self.step_sizes_ *= torch.exp(adaptation)
+        self.step_sizes *= torch.exp(adaptation)
 
     @property
     def acceptance_rates(self) -> torch.Tensor:
@@ -162,3 +162,13 @@ class MetropolisHastingsSampler:
         """
 
         return self.n_accepted / torch.clamp(self.n_samples, min=1.0)
+
+    @property
+    def mean_step_size(self) -> float:
+        """Gets the mean step size.
+
+        Returns:
+            float: The mean step size.
+        """
+
+        return self.step_sizes.mean().item()
