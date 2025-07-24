@@ -47,8 +47,10 @@ class MetropolisHastingsSampler:
         )
 
         # Statistics tracking
-        self.n_samples = 0
-        self.n_accepted = 0
+        self.n_samples = torch.tensor(0.0, dtype=torch.float32)
+        self.n_accepted = torch.zeros(
+            (self.current_state_.shape[0],), dtype=torch.float32
+        )
 
         self._check()
 
@@ -159,16 +161,4 @@ class MetropolisHastingsSampler:
             torch.Tensor: The means of the acceptance_rates accross iterations.
         """
 
-        return self.n_accepted / cast(
-            torch.Tensor, torch.clamp(self.n_samples, min=1.0)  # type: ignore
-        )
-
-    @property
-    def mean_step_size(self) -> float:
-        """Gets the mean step size.
-
-        Returns:
-            float: The mean step size.
-        """
-
-        return self.step_sizes_.mean().item()
+        return self.n_accepted / torch.clamp(self.n_samples, min=1.0)
